@@ -1,5 +1,8 @@
 import logging
 
+from app.api.routes.vehiculos import router as vehiculos_router
+from app.api.routes.consultas import router as consultas_router
+
 import pymysql
 from fastapi import FastAPI, HTTPException
 
@@ -15,6 +18,9 @@ app = FastAPI(
     description="API local para administrar vehículos IoT.",
     version="1.0.0",
 )
+
+app.include_router(vehiculos_router)
+app.include_router(consultas_router)
 
 
 @app.get("/", tags=["General"])
