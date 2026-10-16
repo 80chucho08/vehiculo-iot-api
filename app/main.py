@@ -3,6 +3,11 @@ import logging
 from app.api.routes.vehiculos import router as vehiculos_router
 from app.api.routes.consultas import router as consultas_router
 from app.api.routes.operaciones import router as operaciones_router
+from app.api.routes.websocket import router as websocket_router
+
+from app.api.routes.ejecucion_demos import (
+    router as ejecucion_demos_router,
+)
 
 import pymysql
 from fastapi import FastAPI, HTTPException
@@ -23,6 +28,8 @@ app = FastAPI(
 app.include_router(vehiculos_router)
 app.include_router(consultas_router)
 app.include_router(operaciones_router)
+app.include_router(websocket_router)
+app.include_router(ejecucion_demos_router)
 
 
 @app.get("/", tags=["General"])
