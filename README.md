@@ -4,6 +4,10 @@ API REST y WebSocket para administrar vehículos IoT, consultar su información 
 
 > La API coordina las operaciones y la comunicación con los vehículos. La base de datos debe estar preparada con los procedimientos almacenados que utiliza el proyecto.
 
+<p align="center">
+  <img src="images\writingnotes.png" width="400" alt="Texto alternativo">
+</p>
+
 ## ✨ Funcionalidades
 
 - Administración de vehículos, comandos, demos y movimientos.
