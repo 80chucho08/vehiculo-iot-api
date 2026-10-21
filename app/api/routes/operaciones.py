@@ -1,10 +1,12 @@
 
+import asyncio
 from typing import Any
 
 import pymysql
 from fastapi import APIRouter, HTTPException
 from pydantic import BaseModel, Field
 
+from app.core.websocket_manager import websocket_manager
 from app.db.connection import get_connection
 from app.db.procedure_executor import execute_procedure
 
@@ -325,17 +327,30 @@ def eliminar_movimiento_demo(id_demo_movimiento: int):
 # ESTADO DEL VEHÍCULO
 
 @router.put("/vehiculos/{id_vehiculo}/estado")
-def actualizar_estado(
+async def actualizar_estado(
     id_vehiculo: int,
     datos: EstadoActualizar,
 ):
-    resultados = ejecutar_operacion(
+    resultados = await asyncio.to_thread(
+        ejecutar_operacion,
         "sp_actualizar_estado",
         (
             id_vehiculo,
             datos.id_comando,
             int(datos.conectado),
         ),
+    )
+
+    await websocket_manager.send_to_vehicle(
+        id_vehiculo,
+        {
+            "tipo": "estado_actualizado",
+            "id_vehiculo": id_vehiculo,
+            "estado": {
+                "id_comando": datos.id_comando,
+                "conectado": datos.conectado,
+            },
+        },
     )
 
     return {

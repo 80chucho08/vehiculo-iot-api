@@ -31,6 +31,14 @@ async def websocket_vehiculo(
 
             estado = resultados[0] if resultados else []
 
+            resultados_demos = execute_procedure(
+                connection,
+                "sp_obtener_demos",
+                (id_vehiculo,),
+            )
+
+            demos = resultados_demos[0] if resultados_demos else []
+
         finally:
             connection.close()
 
@@ -39,6 +47,7 @@ async def websocket_vehiculo(
                 "tipo": "estado_inicial",
                 "id_vehiculo": id_vehiculo,
                 "estado": estado,
+                "demos": demos,
             })
         )
 

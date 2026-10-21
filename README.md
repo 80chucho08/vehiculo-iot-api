@@ -114,6 +114,8 @@ Las solicitudes de creación y actualización usan JSON. La documentación inter
 
 El cliente del vehículo abre una conexión a `ws://127.0.0.1:8000/ws/vehiculos/{id_vehiculo}`. Al conectar, la API envía el estado almacenado y los cambios se distribuyen a los clientes conectados al mismo vehículo. La demo activa envía mensajes `comando_demo` con el comando, código, orden, duración y pausa; también informa el inicio, la finalización, la cancelación o un error.
 
+Al conectar, `estado_inicial` tambien incluye la lista de demos en `demos`. Cada actualizacion correcta mediante `PUT /api/vehiculos/{id_vehiculo}/estado` envia a los clientes conectados un mensaje `estado_actualizado` con `id_comando` y `conectado`.
+
 Para ejecutar una demo, el vehículo debe estar conectado por WebSocket y la demo debe existir, estar activa y tener movimientos configurados. Al cancelarla, la API intenta enviar el comando de detener (`DETENER`, `STOP` o `ALTO`) si existe uno activo.
 
 ## 🗄️ Base de datos
