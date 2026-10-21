@@ -85,6 +85,9 @@ class HistorialRegistrar(BaseModel):
 def ejecutar_operacion(
     procedimiento: str,
     parametros: tuple[Any, ...],
+    operaciones_adicionales: tuple[
+        tuple[str, tuple[Any, ...]], ...
+    ] = (),
 ) -> list[list[dict[str, Any]]]:
     connection = None
 
@@ -96,6 +99,13 @@ def ejecutar_operacion(
             procedimiento,
             parametros,
         )
+
+        for procedimiento_adicional, parametros_adicionales in operaciones_adicionales:
+            execute_procedure(
+                connection,
+                procedimiento_adicional,
+                parametros_adicionales,
+            )
 
         connection.commit()
         return resultados
@@ -331,6 +341,15 @@ async def actualizar_estado(
     id_vehiculo: int,
     datos: EstadoActualizar,
 ):
+    operaciones_adicionales = ()
+    if datos.id_comando is not None:
+        operaciones_adicionales = (
+            (
+                "sp_registrar_historial",
+                (id_vehiculo, datos.id_comando, "api"),
+            ),
+        )
+
     resultados = await asyncio.to_thread(
         ejecutar_operacion,
         "sp_actualizar_estado",
@@ -339,6 +358,7 @@ async def actualizar_estado(
             datos.id_comando,
             int(datos.conectado),
         ),
+        operaciones_adicionales,
     )
 
     await websocket_manager.send_to_vehicle(
