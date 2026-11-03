@@ -1,4 +1,5 @@
 
+import asyncio
 import json
 import logging
 
@@ -13,6 +14,28 @@ from app.db.procedure_executor import execute_procedure
 
 router = APIRouter(tags=["WebSocket IoT"])
 logger = logging.getLogger(__name__)
+
+
+def cargar_estado_inicial(id_vehiculo: int):
+    """Carga el estado y las demos usando PyMySQL fuera del event loop."""
+    connection = get_connection()
+    try:
+        resultados = execute_procedure(
+            connection,
+            "sp_obtener_estado",
+            (id_vehiculo,),
+        )
+        estado = resultados[0] if resultados else []
+
+        resultados_demos = execute_procedure(
+            connection,
+            "sp_obtener_demos",
+            (id_vehiculo,),
+        )
+        demos = resultados_demos[0] if resultados_demos else []
+        return estado, demos
+    finally:
+        connection.close()
 
 
 @router.websocket("/ws/vehiculos/{id_vehiculo}")
@@ -34,28 +57,11 @@ async def websocket_vehiculo(
     await websocket_manager.connect(id_vehiculo, websocket, rol)
 
     try:
-        # Recuperar el último estado almacenado en RDS.
-        connection = get_connection()
-
-        try:
-            resultados = execute_procedure(
-                connection,
-                "sp_obtener_estado",
-                (id_vehiculo,),
-            )
-
-            estado = resultados[0] if resultados else []
-
-            resultados_demos = execute_procedure(
-                connection,
-                "sp_obtener_demos",
-                (id_vehiculo,),
-            )
-
-            demos = resultados_demos[0] if resultados_demos else []
-
-        finally:
-            connection.close()
+        # PyMySQL es síncrono: no bloquear el event loop que recibe los ACK.
+        estado, demos = await asyncio.to_thread(
+            cargar_estado_inicial,
+            id_vehiculo,
+        )
 
         await websocket.send_json(
             jsonable_encoder({

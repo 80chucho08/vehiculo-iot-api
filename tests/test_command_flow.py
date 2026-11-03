@@ -1,3 +1,6 @@
+import asyncio
+import inspect
+import json
 import os
 import unittest
 from unittest.mock import AsyncMock, patch
@@ -6,9 +9,10 @@ os.environ.setdefault("DB_HOST", "localhost")
 os.environ.setdefault("DB_USER", "test")
 os.environ.setdefault("DB_PASSWORD", "test")
 
-from fastapi import HTTPException
+from fastapi import FastAPI, HTTPException
+from starlette.websockets import WebSocketDisconnect
 
-from app.api.routes import operaciones
+from app.api.routes import operaciones, websocket as websocket_routes
 from app.core.websocket_manager import WebSocketManager, websocket_manager
 from app.services import demo_executor
 
@@ -30,6 +34,33 @@ class FakeWebSocket:
         self.sent.append(mensaje)
         if self.on_send is not None:
             await self.on_send(mensaje)
+
+
+class FakeDeviceWebSocket(FakeWebSocket):
+    def __init__(self):
+        super().__init__()
+        self.query_params = {"rol": "dispositivo"}
+        self.accepted = asyncio.Event()
+        self.incoming = asyncio.Queue()
+
+    async def accept(self):
+        self.accepted.set()
+
+    async def send_json(self, mensaje):
+        await super().send_json(mensaje)
+        if mensaje.get("tipo") == "comando_individual":
+            await self.incoming.put(json.dumps({
+                "tipo": "comando_ack",
+                "id_vehiculo": mensaje["id_vehiculo"],
+                "id_solicitud": mensaje["id_solicitud"],
+                "estado": "procesado",
+            }))
+
+    async def receive_text(self):
+        mensaje = await self.incoming.get()
+        if mensaje is None:
+            raise WebSocketDisconnect()
+        return mensaje
 
 
 class CommandValidationTests(unittest.TestCase):
@@ -204,6 +235,111 @@ class AsyncCommandFlowTests(unittest.IsolatedAsyncioTestCase):
             )
         self.assertEqual(sleeps, [0.5, 0.2])
         self.assertIn("demo_completada", [message["tipo"] for message in socket.sent])
+
+    async def test_http_stop_request_resolves_ack_while_waiting(self):
+        app = FastAPI()
+        app.include_router(operaciones.router)
+        dispositivo = FakeDeviceWebSocket()
+
+        eventos = []
+
+        async def receive():
+            if not eventos:
+                eventos.append("request")
+                return {"type": "http.request", "body": b"", "more_body": False}
+            return {"type": "http.disconnect"}
+
+        async def send(event):
+            eventos.append(event)
+
+        scope = {
+            "type": "http",
+            "asgi": {"version": "3.0", "spec_version": "2.3"},
+            "http_version": "1.1",
+            "method": "POST",
+            "scheme": "http",
+            "path": "/api/vehiculos/1/detener",
+            "raw_path": b"/api/vehiculos/1/detener",
+            "query_string": b"",
+            "headers": [(b"host", b"testserver")],
+            "server": ("testserver", 80),
+            "client": ("127.0.0.1", 12345),
+            "root_path": "",
+        }
+
+        with patch.object(websocket_routes, "cargar_estado_inicial", return_value=([], [])):
+            websocket_task = asyncio.create_task(
+                websocket_routes.websocket_vehiculo(dispositivo, 1)
+            )
+            await dispositivo.accepted.wait()
+            while websocket_manager.connected_clients(1, "dispositivo") == 0:
+                await asyncio.sleep(0)
+            with patch.object(operaciones, "ejecutar_operacion", return_value=[[]]):
+                await app(scope, receive, send)
+            await dispositivo.incoming.put(None)
+            await websocket_task
+
+        response_start = next(event for event in eventos if event["type"] == "http.response.start")
+        response_body = next(event for event in eventos if event["type"] == "http.response.body")
+        body = json.loads(response_body["body"])
+        self.assertEqual(
+            response_start["status"],
+            200,
+            f"sent={dispositivo.sent!r} incoming={dispositivo.incoming.qsize()} "
+            f"websocket_done={websocket_task.done()}",
+        )
+        self.assertEqual(body["estado"], "procesado_por_firmware")
+        self.assertNotIn(body["id_solicitud"], websocket_manager.pending_acks)
+
+    async def test_unknown_ack_does_not_resolve_another_request(self):
+        solicitud = "solicitud-pendiente"
+        espera = websocket_manager.crear_espera_ack(solicitud)
+
+        self.assertFalse(
+            websocket_manager.resolver_ack(
+                "solicitud-desconocida",
+                {"estado": "procesado"},
+            )
+        )
+        self.assertFalse(espera.done())
+        self.assertTrue(
+            websocket_manager.resolver_ack(
+                solicitud,
+                {"estado": "procesado"},
+            )
+        )
+        self.assertEqual((await espera)["estado"], "procesado")
+
+    async def test_late_ack_after_timeout_is_ignored_without_error(self):
+        socket = FakeWebSocket()
+        await websocket_manager.connect(1, socket, "dispositivo")
+        id_solicitud = "solicitud-con-timeout"
+
+        with self.assertRaises(HTTPException) as error:
+            await operaciones.enviar_comando_y_esperar_ack(
+                1,
+                {
+                    "tipo": "comando_individual",
+                    "id_vehiculo": 1,
+                    "id_solicitud": id_solicitud,
+                    "codigo": 0,
+                },
+                timeout=0.01,
+            )
+
+        self.assertEqual(error.exception.status_code, 504)
+        self.assertNotIn(id_solicitud, websocket_manager.pending_acks)
+        self.assertFalse(
+            websocket_manager.resolver_ack(
+                id_solicitud,
+                {"estado": "procesado"},
+            )
+        )
+        self.assertEqual(
+            inspect.signature(operaciones.enviar_comando_y_esperar_ack)
+            .parameters["timeout"].default,
+            3.0,
+        )
 
 
 if __name__ == "__main__":
