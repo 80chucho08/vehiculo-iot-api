@@ -1,5 +1,6 @@
 
 import asyncio
+import logging
 import uuid
 from typing import Any
 
@@ -18,6 +19,7 @@ router = APIRouter(
     prefix="/api",
     tags=["Operaciones IoT"],
 )
+logger = logging.getLogger(__name__)
 
 
 # Modelos de validación
@@ -167,13 +169,31 @@ async def enviar_comando_y_esperar_ack(
 ) -> dict[str, Any]:
     id_solicitud = mensaje["id_solicitud"]
     espera = websocket_manager.crear_espera_ack(id_solicitud)
+    logger.info(
+        "ACK registrado id_solicitud=%s id_vehiculo=%s tipo=%s timeout_s=%.1f",
+        id_solicitud,
+        id_vehiculo,
+        mensaje.get("tipo"),
+        timeout,
+    )
     try:
         enviados = await websocket_manager.send_to_vehicle(
             id_vehiculo,
             mensaje,
             role="dispositivo",
         )
+        logger.info(
+            "Envío WebSocket completado id_solicitud=%s id_vehiculo=%s conexiones_aceptadas=%s",
+            id_solicitud,
+            id_vehiculo,
+            enviados,
+        )
         if enviados == 0:
+            logger.warning(
+                "Comando no enviado: dispositivo ausente id_solicitud=%s id_vehiculo=%s",
+                id_solicitud,
+                id_vehiculo,
+            )
             raise HTTPException(
                 status_code=409,
                 detail="No hay un dispositivo WebSocket conectado.",
@@ -181,6 +201,12 @@ async def enviar_comando_y_esperar_ack(
         try:
             return await asyncio.wait_for(espera, timeout=timeout)
         except asyncio.TimeoutError:
+            logger.warning(
+                "Timeout esperando ACK id_solicitud=%s id_vehiculo=%s timeout_s=%.1f",
+                id_solicitud,
+                id_vehiculo,
+                timeout,
+            )
             raise HTTPException(
                 status_code=504,
                 detail="El dispositivo no confirmó la recepción del comando.",
