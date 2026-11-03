@@ -1,17 +1,19 @@
 
 import asyncio
+import uuid
 from typing import Any
 
 from app.core.websocket_manager import websocket_manager
 from app.db.connection import get_connection
+from app.db.operation_executor import ejecutar_operacion
 from app.db.procedure_executor import execute_procedure
 
 
 def cargar_datos_demo(
     id_vehiculo: int,
     id_demo: int,
-) -> tuple[dict[str, Any], list[dict[str, Any]], list[dict[str, Any]]]:
-    """Consulta la demo, sus movimientos y los comandos del vehículo."""
+) -> tuple[dict[str, Any], list[dict[str, Any]]]:
+    """Consulta la demo y sus movimientos."""
     connection = get_connection()
 
     try:
@@ -53,23 +55,12 @@ def cargar_datos_demo(
         if not movimientos:
             raise ValueError("La demo no tiene movimientos configurados.")
 
-        resultados_comandos = execute_procedure(
-            connection,
-            "sp_obtener_comandos_vehiculo",
-            (id_vehiculo,),
-        )
-        comandos = (
-            resultados_comandos[0]
-            if resultados_comandos
-            else []
-        )
-
         movimientos = sorted(
             movimientos,
             key=lambda movimiento: int(movimiento["orden"]),
         )
 
-        return demo, movimientos, comandos
+        return demo, movimientos
 
     finally:
         connection.close()
@@ -78,6 +69,8 @@ def cargar_datos_demo(
 class DemoExecutionManager:
     def __init__(self):
         self.tasks: dict[int, asyncio.Task] = {}
+        self.individual_commands: set[int] = set()
+        self.start_results: dict[int, asyncio.Future[bool]] = {}
         self.lock = asyncio.Lock()
 
     async def iniciar(
@@ -86,13 +79,13 @@ class DemoExecutionManager:
         id_demo: int,
     ) -> None:
         # Las consultas usan PyMySQL, que es síncrono.
-        demo, movimientos, comandos = await asyncio.to_thread(
+        demo, movimientos = await asyncio.to_thread(
             cargar_datos_demo,
             id_vehiculo,
             id_demo,
         )
 
-        if websocket_manager.connected_clients(id_vehiculo) == 0:
+        if websocket_manager.connected_clients(id_vehiculo, "dispositivo") == 0:
             raise RuntimeError(
                 "No hay clientes WebSocket conectados al vehículo."
             )
@@ -105,16 +98,32 @@ class DemoExecutionManager:
                     "Ya hay una demo ejecutándose para este vehículo."
                 )
 
+            if id_vehiculo in self.individual_commands:
+                raise RuntimeError(
+                    "Hay un comando individual en curso para este vehículo."
+                )
+
+            start_result = asyncio.get_running_loop().create_future()
+            self.start_results[id_vehiculo] = start_result
             tarea = asyncio.create_task(
                 self._ejecutar(
                     id_vehiculo,
                     demo,
                     movimientos,
-                    comandos,
                 )
             )
 
             self.tasks[id_vehiculo] = tarea
+
+        try:
+            aceptada = await asyncio.wait_for(
+                asyncio.shield(start_result),
+                timeout=4,
+            )
+        except asyncio.TimeoutError:
+            raise RuntimeError("El dispositivo no confirmó el inicio de la demo.") from None
+        if not aceptada:
+            raise RuntimeError("El firmware rechazó el inicio de la demo.")
 
     async def cancelar(self, id_vehiculo: int) -> None:
         async with self.lock:
@@ -136,23 +145,12 @@ class DemoExecutionManager:
         id_vehiculo: int,
         demo: dict[str, Any],
         movimientos: list[dict[str, Any]],
-        comandos: list[dict[str, Any]],
     ) -> None:
         id_demo = int(demo["id_demo"])
 
-        comando_detener = next(
-            (
-                comando
-                for comando in comandos
-                if str(comando.get("nombre", "")).strip().upper()
-                in {"DETENER", "STOP", "ALTO"}
-                and bool(comando.get("activo", 1))
-            ),
-            None,
-        )
-
         try:
-            await websocket_manager.send_to_vehicle(
+            inicio_ack = websocket_manager.crear_espera_demo_ack(id_demo)
+            enviados_inicio = await websocket_manager.send_to_vehicle(
                 id_vehiculo,
                 {
                     "tipo": "demo_iniciada",
@@ -161,9 +159,27 @@ class DemoExecutionManager:
                     "nombre": demo["nombre"],
                     "total_movimientos": len(movimientos),
                 },
+                role="dispositivo",
             )
+            if enviados_inicio == 0:
+                websocket_manager.quitar_espera_demo_ack(id_demo)
+                raise RuntimeError("No quedan clientes WebSocket conectados.")
+
+            try:
+                respuesta_inicio = await asyncio.wait_for(inicio_ack, timeout=3)
+            finally:
+                websocket_manager.quitar_espera_demo_ack(id_demo)
+            if respuesta_inicio.get("estado") != "aceptado":
+                resultado_inicio = self.start_results.get(id_vehiculo)
+                if resultado_inicio is not None and not resultado_inicio.done():
+                    resultado_inicio.set_result(False)
+                raise RuntimeError("El firmware rechazó el inicio de la demo.")
+            resultado_inicio = self.start_results.get(id_vehiculo)
+            if resultado_inicio is not None and not resultado_inicio.done():
+                resultado_inicio.set_result(True)
 
             for movimiento in movimientos:
+                id_solicitud = str(uuid.uuid4())
                 mensaje = {
                     "tipo": "comando_demo",
                     "id_vehiculo": id_vehiculo,
@@ -171,6 +187,7 @@ class DemoExecutionManager:
                     "id_demo_movimiento": movimiento[
                         "id_demo_movimiento"
                     ],
+                    "id_solicitud": id_solicitud,
                     "orden": movimiento["orden"],
                     "id_comando": movimiento["id_comando"],
                     "comando": movimiento["comando"],
@@ -179,15 +196,37 @@ class DemoExecutionManager:
                     "pausa_ms": movimiento["pausa_ms"],
                 }
 
+                espera_ack = websocket_manager.crear_espera_ack(id_solicitud)
                 enviados = await websocket_manager.send_to_vehicle(
                     id_vehiculo,
                     mensaje,
+                    role="dispositivo",
                 )
 
                 if enviados == 0:
+                    websocket_manager.quitar_espera_ack(id_solicitud)
                     raise RuntimeError(
                         "No quedan clientes WebSocket conectados."
                     )
+
+                # El callback del firmware confirma que despachó la acción;
+                # no representa una medición física del actuador.
+                try:
+                    respuesta = await asyncio.wait_for(espera_ack, timeout=3)
+                finally:
+                    websocket_manager.quitar_espera_ack(id_solicitud)
+                if respuesta.get("estado") != "procesado":
+                    raise RuntimeError("El firmware rechazó un movimiento de la demo.")
+
+                await asyncio.to_thread(
+                    ejecutar_operacion,
+                    "sp_actualizar_estado",
+                    (id_vehiculo, int(movimiento["id_comando"]), 1),
+                    ((
+                        "sp_registrar_historial",
+                        (id_vehiculo, int(movimiento["id_comando"]), "demo"),
+                    ),),
+                )
 
                 await asyncio.sleep(
                     int(movimiento["duracion_ms"]) / 1000
@@ -209,22 +248,24 @@ class DemoExecutionManager:
             )
 
         except asyncio.CancelledError:
-            # Intentar detener el vehículo si existe un comando habilitado
-            # para ello en la base de datos.
-            if comando_detener is not None:
-                await websocket_manager.send_to_vehicle(
-                    id_vehiculo,
-                    {
-                        "tipo": "comando_demo",
-                        "id_vehiculo": id_vehiculo,
-                        "id_demo": id_demo,
-                        "comando": comando_detener["nombre"],
-                        "codigo": comando_detener["codigo"],
-                        "duracion_ms": 0,
-                        "pausa_ms": 0,
-                        "motivo": "cancelacion",
-                    },
-                )
+            resultado_inicio = self.start_results.get(id_vehiculo)
+            if resultado_inicio is not None and not resultado_inicio.done():
+                resultado_inicio.set_result(False)
+            await websocket_manager.send_to_vehicle(
+                id_vehiculo,
+                {
+                    "tipo": "comando_demo",
+                    "id_vehiculo": id_vehiculo,
+                    "id_demo": id_demo,
+                    "id_solicitud": str(uuid.uuid4()),
+                    "comando": "APAGAR_TODO",
+                    "codigo": 0,
+                    "duracion_ms": 0,
+                    "pausa_ms": 0,
+                    "motivo": "cancelacion",
+                },
+                role="dispositivo",
+            )
 
             await websocket_manager.send_to_vehicle(
                 id_vehiculo,
@@ -236,6 +277,9 @@ class DemoExecutionManager:
             )
 
         except Exception:
+            resultado_inicio = self.start_results.get(id_vehiculo)
+            if resultado_inicio is not None and not resultado_inicio.done():
+                resultado_inicio.set_result(False)
             await websocket_manager.send_to_vehicle(
                 id_vehiculo,
                 {
@@ -252,6 +296,7 @@ class DemoExecutionManager:
 
                 if tarea is asyncio.current_task():
                     self.tasks.pop(id_vehiculo, None)
+                    self.start_results.pop(id_vehiculo, None)
 
 
 demo_execution_manager = DemoExecutionManager()

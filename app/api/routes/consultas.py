@@ -3,6 +3,7 @@ from typing import Any
 import pymysql
 from fastapi import APIRouter, HTTPException
 
+from app.core.websocket_manager import websocket_manager
 from app.db.connection import get_connection
 from app.db.procedure_executor import execute_procedure
 
@@ -79,6 +80,9 @@ def obtener_estado(id_vehiculo: int):
     return {
         "total": len(resultados),
         "estado": resultados,
+        "conectado_websocket": (
+            websocket_manager.connected_clients(id_vehiculo, "dispositivo") > 0
+        ),
     }
 
 

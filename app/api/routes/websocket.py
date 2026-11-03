@@ -1,7 +1,9 @@
 
+import json
+
+import pymysql
 from fastapi import APIRouter, WebSocket, WebSocketDisconnect
 from fastapi.encoders import jsonable_encoder
-import pymysql
 
 from app.core.websocket_manager import websocket_manager
 from app.db.connection import get_connection
@@ -16,7 +18,18 @@ async def websocket_vehiculo(
     websocket: WebSocket,
     id_vehiculo: int,
 ):
-    await websocket_manager.connect(id_vehiculo, websocket)
+    rol = websocket.query_params.get("rol", "observador")
+    if rol not in {"dispositivo", "observador"}:
+        await websocket.close(code=1008)
+        return
+    if rol == "dispositivo" and websocket_manager.connected_clients(
+        id_vehiculo,
+        "dispositivo",
+    ) > 0:
+        await websocket.close(code=1013)
+        return
+
+    await websocket_manager.connect(id_vehiculo, websocket, rol)
 
     try:
         # Recuperar el último estado almacenado en RDS.
@@ -51,9 +64,50 @@ async def websocket_vehiculo(
             })
         )
 
-        # Mantener abierta la conexión hasta que el cliente se desconecte.
+        if rol == "dispositivo":
+            await websocket_manager.send_to_vehicle(
+                id_vehiculo,
+                {
+                    "tipo": "dispositivo_estado",
+                    "id_vehiculo": id_vehiculo,
+                    "conectado": True,
+                },
+                role="observador",
+            )
+
+        # Los ACK relacionan el despacho del firmware con una solicitud REST.
         while True:
-            await websocket.receive_text()
+            texto = await websocket.receive_text()
+            try:
+                mensaje = json.loads(texto)
+            except (TypeError, json.JSONDecodeError):
+                continue
+
+            if not isinstance(mensaje, dict):
+                continue
+            if mensaje.get("id_vehiculo") != id_vehiculo:
+                continue
+
+            if rol == "dispositivo" and mensaje.get("tipo") == "comando_ack":
+                id_solicitud = mensaje.get("id_solicitud")
+                if isinstance(id_solicitud, str):
+                    websocket_manager.resolver_ack(id_solicitud, mensaje)
+            elif rol == "dispositivo" and mensaje.get("tipo") == "demo_ack":
+                id_demo = mensaje.get("id_demo")
+                if isinstance(id_demo, int):
+                    websocket_manager.resolver_demo_ack(id_demo, mensaje)
+            elif rol == "dispositivo" and mensaje.get("tipo") == "dispositivo_estado":
+                conectado = mensaje.get("conectado")
+                if isinstance(conectado, bool):
+                    await websocket_manager.send_to_vehicle(
+                        id_vehiculo,
+                        {
+                            "tipo": "dispositivo_estado",
+                            "id_vehiculo": id_vehiculo,
+                            "conectado": conectado,
+                        },
+                        role="observador",
+                    )
 
     except WebSocketDisconnect:
         pass
@@ -70,3 +124,13 @@ async def websocket_vehiculo(
 
     finally:
         websocket_manager.disconnect(id_vehiculo, websocket)
+        if rol == "dispositivo":
+            await websocket_manager.send_to_vehicle(
+                id_vehiculo,
+                {
+                    "tipo": "dispositivo_estado",
+                    "id_vehiculo": id_vehiculo,
+                    "conectado": False,
+                },
+                role="observador",
+            )

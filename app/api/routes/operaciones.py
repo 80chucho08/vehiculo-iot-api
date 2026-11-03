@@ -1,5 +1,6 @@
 
 import asyncio
+import uuid
 from typing import Any
 
 import pymysql
@@ -8,7 +9,9 @@ from pydantic import BaseModel, Field
 
 from app.core.websocket_manager import websocket_manager
 from app.db.connection import get_connection
+from app.db.operation_executor import ejecutar_operacion
 from app.db.procedure_executor import execute_procedure
+from app.services.demo_executor import demo_execution_manager
 
 
 router = APIRouter(
@@ -80,54 +83,110 @@ class HistorialRegistrar(BaseModel):
     origen: str = Field(min_length=1, max_length=30)
 
 
-# Función compartida para operaciones de escritura
+def primer_resultado(
+    resultados: list[list[dict[str, Any]]],
+) -> list[dict[str, Any]]:
+    return resultados[0] if resultados else []
 
-def ejecutar_operacion(
-    procedimiento: str,
-    parametros: tuple[Any, ...],
-    operaciones_adicionales: tuple[
-        tuple[str, tuple[Any, ...]], ...
-    ] = (),
-) -> list[list[dict[str, Any]]]:
+
+def validar_comando_individual(
+    id_vehiculo: int,
+    id_comando: int,
+) -> dict[str, Any]:
     connection = None
-
     try:
         connection = get_connection()
-
-        resultados = execute_procedure(
+        vehiculos = execute_procedure(
             connection,
-            procedimiento,
-            parametros,
+            "sp_obtener_vehiculo",
+            (id_vehiculo,),
         )
-
-        for procedimiento_adicional, parametros_adicionales in operaciones_adicionales:
-            execute_procedure(
-                connection,
-                procedimiento_adicional,
-                parametros_adicionales,
+        filas_vehiculo = vehiculos[0] if vehiculos else []
+        vehiculo = filas_vehiculo[0] if filas_vehiculo else None
+        if vehiculo is None:
+            raise HTTPException(status_code=404, detail="Vehículo no encontrado.")
+        if "activo" not in vehiculo:
+            raise HTTPException(
+                status_code=500,
+                detail="sp_obtener_vehiculo no devuelve el campo activo.",
             )
+        if not bool(vehiculo["activo"]):
+            raise HTTPException(status_code=409, detail="El vehículo está inactivo.")
 
-        connection.commit()
-        return resultados
-
+        resultado_comandos = execute_procedure(
+            connection,
+            "sp_obtener_comandos_vehiculo",
+            (id_vehiculo,),
+        )
+        comandos = resultado_comandos[0] if resultado_comandos else []
+        comando = next(
+            (
+                fila
+                for fila in comandos
+                if int(fila.get("id_comando", -1)) == id_comando
+            ),
+            None,
+        )
+        if comando is None:
+            raise HTTPException(
+                status_code=404,
+                detail="El comando no existe o no pertenece al vehículo.",
+            )
+        if "activo" not in comando:
+            raise HTTPException(
+                status_code=500,
+                detail="sp_obtener_comandos_vehiculo no devuelve el campo activo.",
+            )
+        if not bool(comando["activo"]):
+            raise HTTPException(status_code=409, detail="El comando está inactivo.")
+        codigo = int(comando["codigo"])
+        if codigo == 13:
+            raise HTTPException(
+                status_code=409,
+                detail="El código 13 inicia una demo y no es un movimiento individual.",
+            )
+        if not 1 <= codigo <= 12:
+            raise HTTPException(status_code=409, detail="Código de movimiento no admitido.")
+        return comando
+    except HTTPException:
+        raise
     except pymysql.MySQLError:
-        if connection is not None:
-            connection.rollback()
-
         raise HTTPException(
             status_code=500,
-            detail="No fue posible completar la operación en la base de datos.",
-        )
-
+            detail="No fue posible validar el vehículo y el comando.",
+        ) from None
     finally:
         if connection is not None:
             connection.close()
 
 
-def primer_resultado(
-    resultados: list[list[dict[str, Any]]],
-) -> list[dict[str, Any]]:
-    return resultados[0] if resultados else []
+async def enviar_comando_y_esperar_ack(
+    id_vehiculo: int,
+    mensaje: dict[str, Any],
+    timeout: float = 3.0,
+) -> dict[str, Any]:
+    id_solicitud = mensaje["id_solicitud"]
+    espera = websocket_manager.crear_espera_ack(id_solicitud)
+    try:
+        enviados = await websocket_manager.send_to_vehicle(
+            id_vehiculo,
+            mensaje,
+            role="dispositivo",
+        )
+        if enviados == 0:
+            raise HTTPException(
+                status_code=409,
+                detail="No hay un dispositivo WebSocket conectado.",
+            )
+        try:
+            return await asyncio.wait_for(espera, timeout=timeout)
+        except asyncio.TimeoutError:
+            raise HTTPException(
+                status_code=504,
+                detail="El dispositivo no confirmó la recepción del comando.",
+            ) from None
+    finally:
+        websocket_manager.quitar_espera_ack(id_solicitud)
 
 
 # VEHÍCULOS
@@ -377,6 +436,122 @@ async def actualizar_estado(
         "mensaje": "Operación de actualización de estado ejecutada correctamente.",
         "resultados": primer_resultado(resultados),
     }
+
+
+@router.post("/vehiculos/{id_vehiculo}/comandos/{id_comando}/ejecutar")
+async def ejecutar_comando_individual(id_vehiculo: int, id_comando: int):
+    comando = await asyncio.to_thread(
+        validar_comando_individual,
+        id_vehiculo,
+        id_comando,
+    )
+
+    async with demo_execution_manager.lock:
+        tarea = demo_execution_manager.tasks.get(id_vehiculo)
+        if tarea is not None and not tarea.done():
+            raise HTTPException(
+                status_code=409,
+                detail="No se puede enviar un comando individual durante una demo.",
+            )
+        if id_vehiculo in demo_execution_manager.individual_commands:
+            raise HTTPException(
+                status_code=409,
+                detail="Ya hay un comando individual pendiente para este vehículo.",
+            )
+        if websocket_manager.connected_clients(id_vehiculo, "dispositivo") == 0:
+            raise HTTPException(
+                status_code=409,
+                detail="No hay un dispositivo WebSocket conectado.",
+            )
+        demo_execution_manager.individual_commands.add(id_vehiculo)
+
+    id_solicitud = str(uuid.uuid4())
+    mensaje = {
+        "tipo": "comando_individual",
+        "id_vehiculo": id_vehiculo,
+        "id_solicitud": id_solicitud,
+        "id_comando": id_comando,
+        "comando": comando["nombre"],
+        "codigo": int(comando["codigo"]),
+    }
+
+    try:
+        ack = await enviar_comando_y_esperar_ack(id_vehiculo, mensaje)
+        if ack.get("estado") != "procesado":
+            raise HTTPException(
+                status_code=409,
+                detail=ack.get("detalle", "El firmware rechazó el comando."),
+            )
+
+        resultados = await asyncio.to_thread(
+            ejecutar_operacion,
+            "sp_actualizar_estado",
+            (id_vehiculo, id_comando, 1),
+            (("sp_registrar_historial", (id_vehiculo, id_comando, "interfaz_web")),),
+        )
+        return {
+            "mensaje": "El firmware aceptó y despachó el comando.",
+            "id_solicitud": id_solicitud,
+            "estado": "procesado_por_firmware",
+            "resultados": primer_resultado(resultados),
+        }
+    finally:
+        async with demo_execution_manager.lock:
+            demo_execution_manager.individual_commands.discard(id_vehiculo)
+
+
+@router.post("/vehiculos/{id_vehiculo}/detener")
+async def detener_vehiculo(id_vehiculo: int):
+    async with demo_execution_manager.lock:
+        tarea = demo_execution_manager.tasks.get(id_vehiculo)
+        if tarea is not None and not tarea.done():
+            raise HTTPException(
+                status_code=409,
+                detail="Cancela la demo antes de detener manualmente el vehículo.",
+            )
+        if id_vehiculo in demo_execution_manager.individual_commands:
+            raise HTTPException(
+                status_code=409,
+                detail="Hay un comando individual pendiente para este vehículo.",
+            )
+        if websocket_manager.connected_clients(id_vehiculo, "dispositivo") == 0:
+            raise HTTPException(
+                status_code=409,
+                detail="No hay un dispositivo WebSocket conectado.",
+            )
+        demo_execution_manager.individual_commands.add(id_vehiculo)
+
+    id_solicitud = str(uuid.uuid4())
+    mensaje = {
+        "tipo": "comando_individual",
+        "id_vehiculo": id_vehiculo,
+        "id_solicitud": id_solicitud,
+        "id_comando": None,
+        "comando": "APAGAR_TODO",
+        "codigo": 0,
+    }
+    try:
+        ack = await enviar_comando_y_esperar_ack(id_vehiculo, mensaje)
+        if ack.get("estado") != "procesado":
+            raise HTTPException(
+                status_code=409,
+                detail=ack.get("detalle", "El firmware rechazó la orden de apagado."),
+            )
+        resultados = await asyncio.to_thread(
+            ejecutar_operacion,
+            "sp_actualizar_estado",
+            (id_vehiculo, None, 1),
+            (("sp_registrar_historial", (id_vehiculo, None, "interfaz_web")),),
+        )
+        return {
+            "mensaje": "El firmware aceptó la orden de apagar todas las salidas.",
+            "id_solicitud": id_solicitud,
+            "estado": "procesado_por_firmware",
+            "resultados": primer_resultado(resultados),
+        }
+    finally:
+        async with demo_execution_manager.lock:
+            demo_execution_manager.individual_commands.discard(id_vehiculo)
 
 
 # HISTORIAL DE COMANDOS
