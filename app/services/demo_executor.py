@@ -13,8 +13,9 @@ from app.db.procedure_executor import execute_procedure
 
 
 logger = logging.getLogger(__name__)
-DEMO_START_ACK_TIMEOUT_S = 8.0
-DEMO_START_RESULT_TIMEOUT_S = 12.0
+DEMO_START_ACK_TIMEOUT_S = 12.0
+DEMO_MOVEMENT_ACK_TIMEOUT_S = 10.0
+DEMO_START_RESULT_TIMEOUT_S = DEMO_START_ACK_TIMEOUT_S + 4.0
 
 
 def cargar_datos_demo(
@@ -193,7 +194,7 @@ class DemoExecutionManager:
 
             espera_ack_inicio = time.monotonic()
             logger.info(
-                "demo_iniciada enviado id_vehiculo=%s id_demo=%s clientes=%s "
+                "Inicio de espera demo_ack id_vehiculo=%s id_demo=%s clientes=%s "
                 "pid=%s ack_timeout_s=%.1f monotonic_s=%.6f",
                 id_vehiculo,
                 id_demo,
@@ -269,12 +270,57 @@ class DemoExecutionManager:
                         "No quedan clientes WebSocket conectados."
                     )
 
+                espera_ack_movimiento = time.monotonic()
+                logger.info(
+                    "Inicio de espera comando_ack id_vehiculo=%s id_demo=%s "
+                    "orden=%s id_demo_movimiento=%s id_solicitud=%s pid=%s "
+                    "timeout_s=%.1f monotonic_s=%.6f",
+                    id_vehiculo,
+                    id_demo,
+                    movimiento["orden"],
+                    movimiento["id_demo_movimiento"],
+                    id_solicitud,
+                    os.getpid(),
+                    DEMO_MOVEMENT_ACK_TIMEOUT_S,
+                    espera_ack_movimiento,
+                )
                 # El callback del firmware confirma que despachó la acción;
                 # no representa una medición física del actuador.
                 try:
-                    respuesta = await asyncio.wait_for(espera_ack, timeout=3)
+                    respuesta = await asyncio.wait_for(
+                        espera_ack,
+                        timeout=DEMO_MOVEMENT_ACK_TIMEOUT_S,
+                    )
+                except asyncio.TimeoutError:
+                    logger.warning(
+                        "Timeout esperando comando_ack id_vehiculo=%s id_demo=%s "
+                        "orden=%s id_demo_movimiento=%s id_solicitud=%s pid=%s "
+                        "elapsed_s=%.3f timeout_s=%.1f",
+                        id_vehiculo,
+                        id_demo,
+                        movimiento["orden"],
+                        movimiento["id_demo_movimiento"],
+                        id_solicitud,
+                        os.getpid(),
+                        time.monotonic() - espera_ack_movimiento,
+                        DEMO_MOVEMENT_ACK_TIMEOUT_S,
+                    )
+                    raise
                 finally:
                     websocket_manager.quitar_espera_ack(id_solicitud)
+                logger.info(
+                    "comando_ack recibido id_vehiculo=%s id_demo=%s orden=%s "
+                    "id_demo_movimiento=%s id_solicitud=%s estado=%s pid=%s "
+                    "elapsed_s=%.3f",
+                    id_vehiculo,
+                    id_demo,
+                    movimiento["orden"],
+                    movimiento["id_demo_movimiento"],
+                    id_solicitud,
+                    respuesta.get("estado"),
+                    os.getpid(),
+                    time.monotonic() - espera_ack_movimiento,
+                )
                 if respuesta.get("estado") != "procesado":
                     raise RuntimeError("El firmware rechazó un movimiento de la demo.")
 
