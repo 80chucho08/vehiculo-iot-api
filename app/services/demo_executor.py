@@ -1,5 +1,8 @@
 
 import asyncio
+import logging
+import os
+import time
 import uuid
 from typing import Any
 
@@ -7,6 +10,11 @@ from app.core.websocket_manager import websocket_manager
 from app.db.connection import get_connection
 from app.db.operation_executor import ejecutar_operacion
 from app.db.procedure_executor import execute_procedure
+
+
+logger = logging.getLogger(__name__)
+DEMO_START_ACK_TIMEOUT_S = 8.0
+DEMO_START_RESULT_TIMEOUT_S = 12.0
 
 
 def cargar_datos_demo(
@@ -115,12 +123,22 @@ class DemoExecutionManager:
 
             self.tasks[id_vehiculo] = tarea
 
+        espera_inicio = time.monotonic()
         try:
             aceptada = await asyncio.wait_for(
                 asyncio.shield(start_result),
-                timeout=4,
+                timeout=DEMO_START_RESULT_TIMEOUT_S,
             )
         except asyncio.TimeoutError:
+            logger.error(
+                "Timeout esperando resultado inicial id_vehiculo=%s id_demo=%s "
+                "pid=%s elapsed_s=%.3f timeout_s=%.1f",
+                id_vehiculo,
+                id_demo,
+                os.getpid(),
+                time.monotonic() - espera_inicio,
+                DEMO_START_RESULT_TIMEOUT_S,
+            )
             raise RuntimeError("El dispositivo no confirmó el inicio de la demo.") from None
         if not aceptada:
             raise RuntimeError("El firmware rechazó el inicio de la demo.")
@@ -150,6 +168,14 @@ class DemoExecutionManager:
 
         try:
             inicio_ack = websocket_manager.crear_espera_demo_ack(id_demo)
+            logger.info(
+                "ACK de inicio registrado id_vehiculo=%s id_demo=%s pid=%s "
+                "monotonic_s=%.6f",
+                id_vehiculo,
+                id_demo,
+                os.getpid(),
+                time.monotonic(),
+            )
             enviados_inicio = await websocket_manager.send_to_vehicle(
                 id_vehiculo,
                 {
@@ -165,10 +191,44 @@ class DemoExecutionManager:
                 websocket_manager.quitar_espera_demo_ack(id_demo)
                 raise RuntimeError("No quedan clientes WebSocket conectados.")
 
+            espera_ack_inicio = time.monotonic()
+            logger.info(
+                "demo_iniciada enviado id_vehiculo=%s id_demo=%s clientes=%s "
+                "pid=%s ack_timeout_s=%.1f monotonic_s=%.6f",
+                id_vehiculo,
+                id_demo,
+                enviados_inicio,
+                os.getpid(),
+                DEMO_START_ACK_TIMEOUT_S,
+                espera_ack_inicio,
+            )
             try:
-                respuesta_inicio = await asyncio.wait_for(inicio_ack, timeout=3)
+                respuesta_inicio = await asyncio.wait_for(
+                    inicio_ack,
+                    timeout=DEMO_START_ACK_TIMEOUT_S,
+                )
+            except asyncio.TimeoutError:
+                logger.warning(
+                    "Timeout esperando demo_ack id_vehiculo=%s id_demo=%s "
+                    "pid=%s elapsed_s=%.3f timeout_s=%.1f",
+                    id_vehiculo,
+                    id_demo,
+                    os.getpid(),
+                    time.monotonic() - espera_ack_inicio,
+                    DEMO_START_ACK_TIMEOUT_S,
+                )
+                raise
             finally:
                 websocket_manager.quitar_espera_demo_ack(id_demo)
+            logger.info(
+                "demo_ack correlacionado id_vehiculo=%s id_demo=%s estado=%s "
+                "pid=%s elapsed_s=%.3f",
+                id_vehiculo,
+                id_demo,
+                respuesta_inicio.get("estado"),
+                os.getpid(),
+                time.monotonic() - espera_ack_inicio,
+            )
             if respuesta_inicio.get("estado") != "aceptado":
                 resultado_inicio = self.start_results.get(id_vehiculo)
                 if resultado_inicio is not None and not resultado_inicio.done():
@@ -277,6 +337,12 @@ class DemoExecutionManager:
             )
 
         except Exception:
+            logger.exception(
+                "Fallo durante ejecución de demo id_vehiculo=%s id_demo=%s pid=%s",
+                id_vehiculo,
+                id_demo,
+                os.getpid(),
+            )
             resultado_inicio = self.start_results.get(id_vehiculo)
             if resultado_inicio is not None and not resultado_inicio.done():
                 resultado_inicio.set_result(False)

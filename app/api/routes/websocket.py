@@ -2,6 +2,8 @@
 import asyncio
 import json
 import logging
+import os
+import time
 
 import pymysql
 from fastapi import APIRouter, WebSocket, WebSocketDisconnect
@@ -153,10 +155,14 @@ async def websocket_vehiculo(
                 if isinstance(id_demo, int):
                     encontrada = websocket_manager.resolver_demo_ack(id_demo, mensaje)
                     logger.info(
-                        "resolver_demo_ack id_vehiculo=%s id_demo=%s pendiente_encontrada=%s",
+                        "resolver_demo_ack id_vehiculo=%s id_demo=%s estado=%s "
+                        "pendiente_encontrada=%s pid=%s monotonic_s=%.6f",
                         id_vehiculo,
                         id_demo,
+                        mensaje.get("estado"),
                         encontrada,
+                        os.getpid(),
+                        time.monotonic(),
                     )
                 else:
                     logger.warning(
