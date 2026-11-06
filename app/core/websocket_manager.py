@@ -38,6 +38,17 @@ class WebSocketManager:
         if not clientes:
             self.connections.pop(id_vehiculo, None)
 
+    async def reemplazar_dispositivo(self, id_vehiculo: int) -> int:
+        clientes = self.connections.get(id_vehiculo, {})
+        viejos = [ws for ws, role in clientes.items() if role == "dispositivo"]
+        for ws in viejos:
+            clientes.pop(ws, None)
+            try:
+                await asyncio.wait_for(ws.close(code=1012), timeout=2)
+            except Exception:
+                pass
+        return len(viejos)
+
     def connected_clients(
         self,
         id_vehiculo: int,

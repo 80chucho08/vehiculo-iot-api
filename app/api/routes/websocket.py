@@ -49,12 +49,14 @@ async def websocket_vehiculo(
     if rol not in {"dispositivo", "observador"}:
         await websocket.close(code=1008)
         return
-    if rol == "dispositivo" and websocket_manager.connected_clients(
-        id_vehiculo,
-        "dispositivo",
-    ) > 0:
-        await websocket.close(code=1013)
-        return
+    if rol == "dispositivo":
+        reemplazados = await websocket_manager.reemplazar_dispositivo(id_vehiculo)
+        if reemplazados:
+            logger.warning(
+                "Conexión de dispositivo anterior reemplazada id_vehiculo=%s cantidad=%s",
+                id_vehiculo,
+                reemplazados,
+            )
 
     await websocket_manager.connect(id_vehiculo, websocket, rol)
 
@@ -215,7 +217,7 @@ async def websocket_vehiculo(
 
     finally:
         websocket_manager.disconnect(id_vehiculo, websocket)
-        if rol == "dispositivo":
+        if rol == "dispositivo" and websocket_manager.connected_clients(id_vehiculo, "dispositivo") == 0:
             await websocket_manager.send_to_vehicle(
                 id_vehiculo,
                 {
