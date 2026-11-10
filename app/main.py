@@ -15,6 +15,8 @@ from fastapi import FastAPI, HTTPException
 from app.core.config import settings
 from app.db.connection import get_connection
 
+from fastapi.middleware.cors import CORSMiddleware
+
 
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
@@ -23,6 +25,20 @@ app = FastAPI(
     title=settings.app_name,
     description="API local para administrar vehículos IoT.",
     version="1.0.0",
+)
+
+ORIGENES_PERMITIDOS = [
+    "http://localhost:3000",
+    "http://127.0.0.1:3000",
+    "https://TUUSUARIO.github.io",   # solo el origen, sin la subruta del repo
+]
+
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=ORIGENES_PERMITIDOS,
+    allow_methods=["GET", "POST", "PUT"],
+    allow_headers=["Accept", "Content-Type"],
+    allow_credentials=False,
 )
 
 app.include_router(vehiculos_router)
