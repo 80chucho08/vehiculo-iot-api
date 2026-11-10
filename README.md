@@ -169,6 +169,7 @@ Los clientes de interfaz se conectan con `?rol=observador` (o sin parámetro). E
 | --- | --- | --- |
 | `estado_inicial` | Al conectar. | `id_vehiculo`, `estado` (filas de estado), `demos` (demos del vehículo). |
 | `estado_actualizado` | Tras actualizar estado por REST. | `id_vehiculo`, `estado.id_comando`, `estado.conectado`. |
+| `comando_individual_completado` | Cuando un comando individual recibe ACK `procesado` y termina la actualización de estado e historial. | `id_vehiculo`, `id_solicitud`, `id_comando`, `comando`, `estado`, `mensaje`. Se envía a los clientes `observador`. |
 | `demo_iniciada` | Al comenzar una demo. | `id_vehiculo`, `id_demo`, `nombre`, `total_movimientos`. |
 | `comando_demo` | Por cada movimiento de demo. | `id_demo_movimiento`, `id_solicitud`, `orden`, `id_comando`, `comando`, `codigo`, `duracion_ms`, `pausa_ms`. |
 | `demo_completada` | Al terminar todos los movimientos. | `id_vehiculo`, `id_demo`, `total_movimientos`. |

@@ -515,6 +515,19 @@ async def ejecutar_comando_individual(id_vehiculo: int, id_comando: int):
             (id_vehiculo, id_comando, 1),
             (("sp_registrar_historial", (id_vehiculo, id_comando, "interfaz_web")),),
         )
+        await websocket_manager.send_to_vehicle(
+            id_vehiculo,
+            {
+                "tipo": "comando_individual_completado",
+                "id_vehiculo": id_vehiculo,
+                "id_solicitud": id_solicitud,
+                "id_comando": id_comando,
+                "comando": comando["nombre"],
+                "estado": "procesado_por_firmware",
+                "mensaje": "El comando se ejecutó correctamente.",
+            },
+            role="observador",
+        )
         return {
             "mensaje": "El firmware aceptó y despachó el comando.",
             "id_solicitud": id_solicitud,
