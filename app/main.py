@@ -30,7 +30,7 @@ app = FastAPI(
 ORIGENES_PERMITIDOS = [
     "http://localhost:3000",
     "http://127.0.0.1:3000",
-    "https://TUUSUARIO.github.io",   # solo el origen, sin la subruta del repo
+    "https://80chucho08.github.io",   # solo el origen, sin la subruta del repo
 ]
 
 app.add_middleware(
