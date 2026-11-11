@@ -256,12 +256,45 @@ Las demos son secuencias de movimientos almacenadas en MySQL que se ejecutan sec
 
 ---
 
-### 3. Modo Fallback (Sin Hardware Físico)
+### 3. Modo Fallback y Observadores Receptores (Ruta Alterna sin Hardware)
 
-Si se está desarrollando el frontend o probando el sistema sin el vehículo conectado:
-1. Una interfaz se conecta como: `ws://.../ws/vehiculos/1?rol=observador&recibir_comandos=1`.
-2. Al llamar a ejecutar un comando o una demo, la API detecta que no hay clientes con rol `dispositivo`.
-3. En lugar de fallar, entrega la orden a los observadores que activaron la recepción de comandos, no bloquea esperando el ACK físico y responde con `estado: "entregado_a_observadores"`.
+Cuando se prueba la plataforma, se desarrolla el frontend o el vehículo físico (ESP) no está conectado, el sistema cuenta con un mecanismo de **ruta alterna** para no bloquear la ejecución de comandos ni de detención:
+
+#### Regla de Receptores (Opt-in)
+- Un cliente observador **solo** se considera receptor si se conecta explícitamente con el parámetro `recibir_comandos=1`:
+  ```text
+  ws://localhost:8000/ws/vehiculos/{id_vehiculo}?rol=observador&recibir_comandos=1
+  # O en producción sobre SSL:
+  wss://vehiculo-iot-itp.duckdns.org/ws/vehiculos/{id_vehiculo}?rol=observador&recibir_comandos=1
+  ```
+- Los observadores comunes (`?rol=observador` o sin parámetros) **no** reciben los mensajes físicos de comando, protegiendo las interfaces de usuario normales de sobrecarga innecesaria.
+
+#### Comportamiento de Envío:
+1. **Con Dispositivo Conectado:**
+   - La orden física se despacha prioritariamente al microcontrolador (`rol=dispositivo`).
+   - Se espera el `comando_ack` hasta por 3.0 segundos.
+   - Responde HTTP 200 con `"estado": "procesado_por_firmware"`.
+   - Si la conexión con el dispositivo falla o el socket se encuentra muerto durante el envío, el socket se descarta automáticamente y la petición cae **en la misma llamada** a los observadores receptores.
+2. **Sin Dispositivo pero con Observadores Receptores:**
+   - Se despacha a los receptores el mismo payload JSON `"comando_individual"` que recibiría el hardware.
+   - **No se espera ACK** de vuelta.
+   - Responde HTTP 200 con estado `"entregado_a_observadores"`:
+     ```json
+     {
+       "mensaje": "No hay dispositivo conectado; el comando se entregó a 1 cliente(s) WebSocket.",
+       "id_solicitud": "7cf73812-7065-4f40-b461-ca5fa9d1ad9f",
+       "estado": "entregado_a_observadores",
+       "resultados": []
+     }
+     ```
+   - Se publica el evento WebSocket `comando_individual_completado` con `"estado": "entregado_a_observadores"` a los observadores.
+3. **Sin Dispositivo ni Receptores:**
+   - Responde HTTP 409 con el detalle:
+     ```json
+     {
+       "detail": "No hay un dispositivo WebSocket conectado."
+     }
+     ```
 
 ---
 

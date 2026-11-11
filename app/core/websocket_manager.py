@@ -64,15 +64,18 @@ class WebSocketManager:
             return len(clientes)
         return sum(1 for cliente_role in clientes.values() if cliente_role == role)
 
-    def observer_connections(self, id_vehiculo: int) -> list[WebSocket]:
+    def receptores(self, id_vehiculo: int) -> list[WebSocket]:
         return [
             websocket
             for websocket, role in self.connections.get(id_vehiculo, {}).items()
             if role == "observador" and websocket in self.observer_command_opt_in
         ]
 
+    def observer_connections(self, id_vehiculo: int) -> list[WebSocket]:
+        return self.receptores(id_vehiculo)
+
     async def enviar_a_observadores(self, id_vehiculo: int, mensaje: dict) -> int:
-        clientes = self.observer_connections(id_vehiculo)
+        clientes = self.receptores(id_vehiculo)
         enviados = 0
         for websocket in clientes:
             try:

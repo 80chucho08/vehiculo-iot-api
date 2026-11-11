@@ -168,58 +168,87 @@ async def enviar_comando_y_esperar_ack(
     timeout: float = 3.0,
 ) -> dict[str, Any] | int:
     id_solicitud = mensaje["id_solicitud"]
-    if websocket_manager.connected_clients(id_vehiculo, "dispositivo") == 0:
-        enviados = await websocket_manager.enviar_a_observadores(id_vehiculo, mensaje)
-        logger.info("Ruta de comando=%s id_vehiculo=%s id_solicitud=%s receptores=%s", "observadores", id_vehiculo, id_solicitud, enviados)
-        if enviados == 0:
-            raise HTTPException(status_code=409, detail="No hay un dispositivo WebSocket conectado.")
-        return enviados
-    logger.info("Ruta de comando=%s id_vehiculo=%s id_solicitud=%s", "dispositivo", id_vehiculo, id_solicitud)
-    espera = websocket_manager.crear_espera_ack(id_solicitud)
-    logger.info(
-        "ACK registrado id_solicitud=%s id_vehiculo=%s tipo=%s timeout_s=%.1f",
-        id_solicitud,
-        id_vehiculo,
-        mensaje.get("tipo"),
-        timeout,
-    )
-    try:
-        enviados = await websocket_manager.send_to_vehicle(
-            id_vehiculo,
-            mensaje,
-            role="dispositivo",
-        )
+    receptores = websocket_manager.receptores(id_vehiculo)
+    num_receptores = len(receptores)
+
+    # a. Si hay dispositivo: intenta el flujo actual.
+    if websocket_manager.connected_clients(id_vehiculo, "dispositivo") > 0:
+        espera = websocket_manager.crear_espera_ack(id_solicitud)
         logger.info(
-            "Envío WebSocket completado id_solicitud=%s id_vehiculo=%s conexiones_aceptadas=%s",
+            "ACK registrado id_solicitud=%s id_vehiculo=%s tipo=%s timeout_s=%.1f",
             id_solicitud,
             id_vehiculo,
-            enviados,
+            mensaje.get("tipo"),
+            timeout,
         )
-        if enviados == 0:
-            logger.warning(
-                "Comando no enviado: dispositivo ausente id_solicitud=%s id_vehiculo=%s",
-                id_solicitud,
-                id_vehiculo,
-            )
-            raise HTTPException(
-                status_code=409,
-                detail="No hay un dispositivo WebSocket conectado.",
-            )
         try:
-            return await asyncio.wait_for(espera, timeout=timeout)
-        except asyncio.TimeoutError:
-            logger.warning(
-                "Timeout esperando ACK id_solicitud=%s id_vehiculo=%s timeout_s=%.1f",
+            enviados = await websocket_manager.send_to_vehicle(
+                id_vehiculo,
+                mensaje,
+                role="dispositivo",
+            )
+            logger.info(
+                "Envío WebSocket completado id_solicitud=%s id_vehiculo=%s conexiones_aceptadas=%s",
                 id_solicitud,
                 id_vehiculo,
-                timeout,
+                enviados,
             )
-            raise HTTPException(
-                status_code=504,
-                detail="El dispositivo no confirmó la recepción del comando.",
-            ) from None
-    finally:
-        websocket_manager.quitar_espera_ack(id_solicitud)
+            if enviados > 0:
+                logger.info(
+                    "Ruta de comando=%s id_vehiculo=%s receptores=%s id_solicitud=%s",
+                    "dispositivo",
+                    id_vehiculo,
+                    num_receptores,
+                    id_solicitud,
+                )
+                try:
+                    return await asyncio.wait_for(espera, timeout=timeout)
+                except asyncio.TimeoutError:
+                    logger.warning(
+                        "Timeout esperando ACK id_solicitud=%s id_vehiculo=%s timeout_s=%.1f",
+                        id_solicitud,
+                        id_vehiculo,
+                        timeout,
+                    )
+                    raise HTTPException(
+                        status_code=504,
+                        detail="El dispositivo no confirmó la recepción del comando.",
+                    ) from None
+            else:
+                logger.warning(
+                    "Envío a dispositivo falló o socket muerto id_solicitud=%s id_vehiculo=%s. Continuando con ruta alterna.",
+                    id_solicitud,
+                    id_vehiculo,
+                )
+        finally:
+            websocket_manager.quitar_espera_ack(id_solicitud)
+
+    # b. Si no hay dispositivo (o no había conexión viva) y hay receptores:
+    receptores_vivos = websocket_manager.receptores(id_vehiculo)
+    if receptores_vivos:
+        enviados = await websocket_manager.enviar_a_observadores(id_vehiculo, mensaje)
+        if enviados > 0:
+            logger.info(
+                "Ruta de comando=%s id_vehiculo=%s receptores=%s id_solicitud=%s",
+                "observadores",
+                id_vehiculo,
+                enviados,
+                id_solicitud,
+            )
+            return enviados
+
+    # c. Si no hay dispositivo ni receptores:
+    logger.info(
+        "Ruta de comando=%s id_vehiculo=%s receptores=%s id_solicitud=%s",
+        "ninguna",
+        id_vehiculo,
+        len(websocket_manager.receptores(id_vehiculo)),
+        id_solicitud,
+    )
+    raise HTTPException(
+        status_code=409,
+        detail="No hay un dispositivo WebSocket conectado.",
+    )
 
 
 # VEHÍCULOS

@@ -45,8 +45,10 @@ async def websocket_vehiculo(
     websocket: WebSocket,
     id_vehiculo: int,
 ):
-    rol = websocket.query_params.get("rol", "observador")
-    recibir_comandos = websocket.query_params.get("recibir_comandos") == "1"
+    params = getattr(websocket, "query_params", {})
+    rol = params.get("rol", "observador")
+    recibir_val = str(params.get("recibir_comandos", "")).strip().lower()
+    recibir_comandos = recibir_val in ("1", "true", "yes", "t")
     if rol not in {"dispositivo", "observador"}:
         await websocket.close(code=1008)
         return

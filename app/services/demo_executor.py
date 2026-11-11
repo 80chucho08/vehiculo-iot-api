@@ -95,7 +95,7 @@ class DemoExecutionManager:
         )
 
         observador_mode = websocket_manager.connected_clients(id_vehiculo, "dispositivo") == 0
-        if observador_mode and not websocket_manager.observer_connections(id_vehiculo):
+        if observador_mode and not websocket_manager.receptores(id_vehiculo):
             raise RuntimeError(
                 "No hay clientes WebSocket conectados al vehículo."
             )
@@ -262,69 +262,104 @@ class DemoExecutionManager:
                     "pausa_ms": movimiento["pausa_ms"],
                 }
 
+                num_receptores = len(websocket_manager.receptores(id_vehiculo))
                 usar_observadores = websocket_manager.connected_clients(id_vehiculo, "dispositivo") == 0
-                if usar_observadores and not websocket_manager.observer_connections(id_vehiculo):
-                    raise RuntimeError("No quedan clientes WebSocket conectados.")
-                logger.info("Ruta de movimiento demo=%s id_vehiculo=%s id_solicitud=%s", "observadores" if usar_observadores else "dispositivo", id_vehiculo, id_solicitud)
-                espera_ack = None if usar_observadores else websocket_manager.crear_espera_ack(id_solicitud)
-                enviados = await websocket_manager.enviar_a_observadores(id_vehiculo, mensaje) if usar_observadores else await websocket_manager.send_to_vehicle(id_vehiculo, mensaje, role="dispositivo")
+                enviados = 0
+                respuesta = {"estado": "procesado"}
 
-                if enviados == 0:
-                    websocket_manager.quitar_espera_ack(id_solicitud)
-                    raise RuntimeError(
-                        "No quedan clientes WebSocket conectados."
-                    )
+                if not usar_observadores:
+                    espera_ack = websocket_manager.crear_espera_ack(id_solicitud)
+                    try:
+                        enviados = await websocket_manager.send_to_vehicle(id_vehiculo, mensaje, role="dispositivo")
+                        if enviados > 0:
+                            logger.info(
+                                "Ruta de comando=%s id_vehiculo=%s receptores=%s id_solicitud=%s",
+                                "dispositivo",
+                                id_vehiculo,
+                                num_receptores,
+                                id_solicitud,
+                            )
+                            espera_ack_movimiento = time.monotonic()
+                            logger.info(
+                                "Inicio de espera comando_ack id_vehiculo=%s id_demo=%s "
+                                "orden=%s id_demo_movimiento=%s id_solicitud=%s pid=%s "
+                                "timeout_s=%.1f monotonic_s=%.6f",
+                                id_vehiculo,
+                                id_demo,
+                                movimiento["orden"],
+                                movimiento["id_demo_movimiento"],
+                                id_solicitud,
+                                os.getpid(),
+                                DEMO_MOVEMENT_ACK_TIMEOUT_S,
+                                espera_ack_movimiento,
+                            )
+                            try:
+                                respuesta = await asyncio.wait_for(espera_ack, timeout=DEMO_MOVEMENT_ACK_TIMEOUT_S)
+                            except asyncio.TimeoutError:
+                                logger.warning(
+                                    "Timeout esperando comando_ack id_vehiculo=%s id_demo=%s "
+                                    "orden=%s id_demo_movimiento=%s id_solicitud=%s pid=%s "
+                                    "elapsed_s=%.3f timeout_s=%.1f",
+                                    id_vehiculo,
+                                    id_demo,
+                                    movimiento["orden"],
+                                    movimiento["id_demo_movimiento"],
+                                    id_solicitud,
+                                    os.getpid(),
+                                    time.monotonic() - espera_ack_movimiento,
+                                    DEMO_MOVEMENT_ACK_TIMEOUT_S,
+                                )
+                                raise
+                            logger.info(
+                                "comando_ack recibido id_vehiculo=%s id_demo=%s orden=%s "
+                                "id_demo_movimiento=%s id_solicitud=%s estado=%s pid=%s "
+                                "elapsed_s=%.3f",
+                                id_vehiculo,
+                                id_demo,
+                                movimiento["orden"],
+                                movimiento["id_demo_movimiento"],
+                                id_solicitud,
+                                respuesta.get("estado"),
+                                os.getpid(),
+                                time.monotonic() - espera_ack_movimiento,
+                            )
+                            if respuesta.get("estado") != "procesado":
+                                raise RuntimeError("El firmware rechazó un movimiento de la demo.")
+                        else:
+                            usar_observadores = True
+                    finally:
+                        websocket_manager.quitar_espera_ack(id_solicitud)
 
-                espera_ack_movimiento = time.monotonic()
-                logger.info(
-                    "Inicio de espera comando_ack id_vehiculo=%s id_demo=%s "
-                    "orden=%s id_demo_movimiento=%s id_solicitud=%s pid=%s "
-                    "timeout_s=%.1f monotonic_s=%.6f",
-                    id_vehiculo,
-                    id_demo,
-                    movimiento["orden"],
-                    movimiento["id_demo_movimiento"],
-                    id_solicitud,
-                    os.getpid(),
-                    DEMO_MOVEMENT_ACK_TIMEOUT_S,
-                    espera_ack_movimiento,
-                )
-                # El callback del firmware confirma que despachó la acción;
-                # no representa una medición física del actuador.
-                try:
-                    respuesta = {"estado": "procesado"} if usar_observadores else await asyncio.wait_for(espera_ack, timeout=DEMO_MOVEMENT_ACK_TIMEOUT_S)
-                except asyncio.TimeoutError:
-                    logger.warning(
-                        "Timeout esperando comando_ack id_vehiculo=%s id_demo=%s "
-                        "orden=%s id_demo_movimiento=%s id_solicitud=%s pid=%s "
-                        "elapsed_s=%.3f timeout_s=%.1f",
-                        id_vehiculo,
-                        id_demo,
-                        movimiento["orden"],
-                        movimiento["id_demo_movimiento"],
-                        id_solicitud,
-                        os.getpid(),
-                        time.monotonic() - espera_ack_movimiento,
-                        DEMO_MOVEMENT_ACK_TIMEOUT_S,
-                    )
-                    raise
-                finally:
-                    websocket_manager.quitar_espera_ack(id_solicitud)
-                logger.info(
-                    "comando_ack recibido id_vehiculo=%s id_demo=%s orden=%s "
-                    "id_demo_movimiento=%s id_solicitud=%s estado=%s pid=%s "
-                    "elapsed_s=%.3f",
-                    id_vehiculo,
-                    id_demo,
-                    movimiento["orden"],
-                    movimiento["id_demo_movimiento"],
-                    id_solicitud,
-                    respuesta.get("estado"),
-                    os.getpid(),
-                    time.monotonic() - espera_ack_movimiento,
-                )
-                if respuesta.get("estado") != "procesado":
-                    raise RuntimeError("El firmware rechazó un movimiento de la demo.")
+                if usar_observadores:
+                    receptores_vivos = websocket_manager.receptores(id_vehiculo)
+                    if receptores_vivos:
+                        enviados = await websocket_manager.enviar_a_observadores(id_vehiculo, mensaje)
+                        if enviados > 0:
+                            logger.info(
+                                "Ruta de comando=%s id_vehiculo=%s receptores=%s id_solicitud=%s",
+                                "observadores",
+                                id_vehiculo,
+                                enviados,
+                                id_solicitud,
+                            )
+                        else:
+                            logger.info(
+                                "Ruta de comando=%s id_vehiculo=%s receptores=%s id_solicitud=%s",
+                                "ninguna",
+                                id_vehiculo,
+                                0,
+                                id_solicitud,
+                            )
+                            raise RuntimeError("No quedan clientes WebSocket conectados.")
+                    else:
+                        logger.info(
+                            "Ruta de comando=%s id_vehiculo=%s receptores=%s id_solicitud=%s",
+                            "ninguna",
+                            id_vehiculo,
+                            0,
+                            id_solicitud,
+                        )
+                        raise RuntimeError("No quedan clientes WebSocket conectados.")
 
                 await asyncio.to_thread(
                     ejecutar_operacion,

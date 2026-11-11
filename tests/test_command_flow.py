@@ -374,6 +374,115 @@ class AsyncCommandFlowTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(device.sent, [mensaje])
         self.assertEqual(observer.sent, [])
 
+    # Pruebas requeridas para los escenarios (a) a (f)
+
+    async def test_scenarios_ejecutar_comando_individual(self):
+        command = {"id_comando": 3, "nombre": "Avanzar", "codigo": 1}
+
+        # (a) Con dispositivo
+        async def ack(mensaje):
+            websocket_manager.resolver_ack(mensaje["id_solicitud"], {"estado": "procesado"})
+        device = FakeWebSocket(ack)
+        await websocket_manager.connect(31, device, "dispositivo")
+        with patch.object(operaciones, "validar_comando_individual", return_value=command), \
+             patch.object(operaciones, "ejecutar_operacion", return_value=[[]]):
+            res_a = await operaciones.ejecutar_comando_individual(31, 3)
+        self.assertEqual(res_a["estado"], "procesado_por_firmware")
+
+        # (b) Sin dispositivo y con receptor
+        receiver = FakeWebSocket()
+        await websocket_manager.connect(32, receiver, "observador", recibir_comandos=True)
+        with patch.object(operaciones, "validar_comando_individual", return_value=command), \
+             patch.object(operaciones, "ejecutar_operacion", return_value=[[]]):
+            res_b = await operaciones.ejecutar_comando_individual(32, 3)
+        self.assertEqual(res_b["estado"], "entregado_a_observadores")
+        self.assertEqual(res_b["resultados"], [])
+        self.assertTrue(any(m.get("tipo") == "comando_individual" for m in receiver.sent))
+
+        # (c) Sin dispositivo y con observador no receptor -> 409
+        non_receiver = FakeWebSocket()
+        await websocket_manager.connect(33, non_receiver, "observador", recibir_comandos=False)
+        with patch.object(operaciones, "validar_comando_individual", return_value=command):
+            with self.assertRaises(HTTPException) as ctx_c:
+                await operaciones.ejecutar_comando_individual(33, 3)
+        self.assertEqual(ctx_c.exception.status_code, 409)
+        self.assertEqual(ctx_c.exception.detail, "No hay un dispositivo WebSocket conectado.")
+
+        # (d) Sin nadie -> 409
+        with patch.object(operaciones, "validar_comando_individual", return_value=command):
+            with self.assertRaises(HTTPException) as ctx_d:
+                await operaciones.ejecutar_comando_individual(34, 3)
+        self.assertEqual(ctx_d.exception.status_code, 409)
+        self.assertEqual(ctx_d.exception.detail, "No hay un dispositivo WebSocket conectado.")
+
+        # (e) Dispositivo muerto más receptor -> debe caer a la ruta alterna
+        class DeadWebSocket(FakeWebSocket):
+            async def send_json(self, _):
+                raise ConnectionResetError("Socket cerrado abruptamente")
+
+        dead_device = DeadWebSocket()
+        receiver_e = FakeWebSocket()
+        await websocket_manager.connect(35, dead_device, "dispositivo")
+        await websocket_manager.connect(35, receiver_e, "observador", recibir_comandos=True)
+        with patch.object(operaciones, "validar_comando_individual", return_value=command), \
+             patch.object(operaciones, "ejecutar_operacion", return_value=[[]]):
+            res_e = await operaciones.ejecutar_comando_individual(35, 3)
+        self.assertEqual(res_e["estado"], "entregado_a_observadores")
+        self.assertEqual(res_e["resultados"], [])
+        self.assertTrue(any(m.get("tipo") == "comando_individual" for m in receiver_e.sent))
+
+    async def test_scenarios_detener_vehiculo(self):
+        # (f.a) Detener con dispositivo
+        async def ack(mensaje):
+            websocket_manager.resolver_ack(mensaje["id_solicitud"], {"estado": "procesado"})
+        device = FakeWebSocket(ack)
+        await websocket_manager.connect(41, device, "dispositivo")
+        with patch.object(operaciones, "ejecutar_operacion", return_value=[[]]):
+            res_fa = await operaciones.detener_vehiculo(41)
+        self.assertEqual(res_fa["estado"], "procesado_por_firmware")
+
+        # (f.b) Detener sin dispositivo y con receptor
+        receiver = FakeWebSocket()
+        await websocket_manager.connect(42, receiver, "observador", recibir_comandos=True)
+        with patch.object(operaciones, "ejecutar_operacion", return_value=[[]]):
+            res_fb = await operaciones.detener_vehiculo(42)
+        self.assertEqual(res_fb["estado"], "entregado_a_observadores")
+        self.assertEqual(res_fb["resultados"], [])
+        msg_stop = next(m for m in receiver.sent if m.get("tipo") == "comando_individual")
+        self.assertEqual(msg_stop["codigo"], 0)
+        self.assertEqual(msg_stop["comando"], "APAGAR_TODO")
+
+        # (f.c) Detener sin dispositivo y con observador no receptor -> 409
+        non_receiver = FakeWebSocket()
+        await websocket_manager.connect(43, non_receiver, "observador", recibir_comandos=False)
+        with self.assertRaises(HTTPException) as ctx_fc:
+            await operaciones.detener_vehiculo(43)
+        self.assertEqual(ctx_fc.exception.status_code, 409)
+        self.assertEqual(ctx_fc.exception.detail, "No hay un dispositivo WebSocket conectado.")
+
+        # (f.d) Detener sin nadie -> 409
+        with self.assertRaises(HTTPException) as ctx_fd:
+            await operaciones.detener_vehiculo(44)
+        self.assertEqual(ctx_fd.exception.status_code, 409)
+        self.assertEqual(ctx_fd.exception.detail, "No hay un dispositivo WebSocket conectado.")
+
+        # (f.e) Detener con dispositivo muerto más receptor -> cae a ruta alterna
+        class DeadWebSocket(FakeWebSocket):
+            async def send_json(self, _):
+                raise ConnectionResetError("Socket cerrado abruptamente")
+
+        dead_device = DeadWebSocket()
+        receiver_fe = FakeWebSocket()
+        await websocket_manager.connect(45, dead_device, "dispositivo")
+        await websocket_manager.connect(45, receiver_fe, "observador", recibir_comandos=True)
+        with patch.object(operaciones, "ejecutar_operacion", return_value=[[]]):
+            res_fe = await operaciones.detener_vehiculo(45)
+        self.assertEqual(res_fe["estado"], "entregado_a_observadores")
+        self.assertEqual(res_fe["resultados"], [])
+        msg_stop_e = next(m for m in receiver_fe.sent if m.get("tipo") == "comando_individual")
+        self.assertEqual(msg_stop_e["codigo"], 0)
+        self.assertEqual(msg_stop_e["comando"], "APAGAR_TODO")
+
 
 if __name__ == "__main__":
     unittest.main()
