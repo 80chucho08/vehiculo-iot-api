@@ -94,7 +94,8 @@ class DemoExecutionManager:
             id_demo,
         )
 
-        if websocket_manager.connected_clients(id_vehiculo, "dispositivo") == 0:
+        observador_mode = websocket_manager.connected_clients(id_vehiculo, "dispositivo") == 0
+        if observador_mode and not websocket_manager.observer_connections(id_vehiculo):
             raise RuntimeError(
                 "No hay clientes WebSocket conectados al vehículo."
             )
@@ -112,18 +113,23 @@ class DemoExecutionManager:
                     "Hay un comando individual en curso para este vehículo."
                 )
 
-            start_result = asyncio.get_running_loop().create_future()
-            self.start_results[id_vehiculo] = start_result
+            start_result = None
+            if not observador_mode:
+                start_result = asyncio.get_running_loop().create_future()
+                self.start_results[id_vehiculo] = start_result
             tarea = asyncio.create_task(
                 self._ejecutar(
                     id_vehiculo,
                     demo,
                     movimientos,
+                    observador_mode,
                 )
             )
 
             self.tasks[id_vehiculo] = tarea
 
+        if observador_mode:
+            return
         espera_inicio = time.monotonic()
         try:
             aceptada = await asyncio.wait_for(
@@ -164,11 +170,12 @@ class DemoExecutionManager:
         id_vehiculo: int,
         demo: dict[str, Any],
         movimientos: list[dict[str, Any]],
+        observador_mode: bool = False,
     ) -> None:
         id_demo = int(demo["id_demo"])
 
         try:
-            inicio_ack = websocket_manager.crear_espera_demo_ack(id_demo)
+            inicio_ack = None if observador_mode else websocket_manager.crear_espera_demo_ack(id_demo)
             logger.info(
                 "ACK de inicio registrado id_vehiculo=%s id_demo=%s pid=%s "
                 "monotonic_s=%.6f",
@@ -177,21 +184,22 @@ class DemoExecutionManager:
                 os.getpid(),
                 time.monotonic(),
             )
-            enviados_inicio = await websocket_manager.send_to_vehicle(
-                id_vehiculo,
-                {
+            mensaje_inicio = {
                     "tipo": "demo_iniciada",
                     "id_vehiculo": id_vehiculo,
                     "id_demo": id_demo,
                     "nombre": demo["nombre"],
                     "total_movimientos": len(movimientos),
-                },
-                role="dispositivo",
-            )
+                }
+            enviados_inicio = (await websocket_manager.enviar_a_observadores(id_vehiculo, mensaje_inicio) if observador_mode else await websocket_manager.send_to_vehicle(id_vehiculo, mensaje_inicio, role="dispositivo"))
             if enviados_inicio == 0:
                 websocket_manager.quitar_espera_demo_ack(id_demo)
                 raise RuntimeError("No quedan clientes WebSocket conectados.")
 
+            if observador_mode:
+                resultado_inicio = self.start_results.get(id_vehiculo)
+                if resultado_inicio is not None and not resultado_inicio.done():
+                    resultado_inicio.set_result(True)
             espera_ack_inicio = time.monotonic()
             logger.info(
                 "Inicio de espera demo_ack id_vehiculo=%s id_demo=%s clientes=%s "
@@ -204,10 +212,7 @@ class DemoExecutionManager:
                 espera_ack_inicio,
             )
             try:
-                respuesta_inicio = await asyncio.wait_for(
-                    inicio_ack,
-                    timeout=DEMO_START_ACK_TIMEOUT_S,
-                )
+                respuesta_inicio = {"estado": "aceptado"} if observador_mode else await asyncio.wait_for(inicio_ack, timeout=DEMO_START_ACK_TIMEOUT_S)
             except asyncio.TimeoutError:
                 logger.warning(
                     "Timeout esperando demo_ack id_vehiculo=%s id_demo=%s "
@@ -257,12 +262,12 @@ class DemoExecutionManager:
                     "pausa_ms": movimiento["pausa_ms"],
                 }
 
-                espera_ack = websocket_manager.crear_espera_ack(id_solicitud)
-                enviados = await websocket_manager.send_to_vehicle(
-                    id_vehiculo,
-                    mensaje,
-                    role="dispositivo",
-                )
+                usar_observadores = websocket_manager.connected_clients(id_vehiculo, "dispositivo") == 0
+                if usar_observadores and not websocket_manager.observer_connections(id_vehiculo):
+                    raise RuntimeError("No quedan clientes WebSocket conectados.")
+                logger.info("Ruta de movimiento demo=%s id_vehiculo=%s id_solicitud=%s", "observadores" if usar_observadores else "dispositivo", id_vehiculo, id_solicitud)
+                espera_ack = None if usar_observadores else websocket_manager.crear_espera_ack(id_solicitud)
+                enviados = await websocket_manager.enviar_a_observadores(id_vehiculo, mensaje) if usar_observadores else await websocket_manager.send_to_vehicle(id_vehiculo, mensaje, role="dispositivo")
 
                 if enviados == 0:
                     websocket_manager.quitar_espera_ack(id_solicitud)
@@ -287,10 +292,7 @@ class DemoExecutionManager:
                 # El callback del firmware confirma que despachó la acción;
                 # no representa una medición física del actuador.
                 try:
-                    respuesta = await asyncio.wait_for(
-                        espera_ack,
-                        timeout=DEMO_MOVEMENT_ACK_TIMEOUT_S,
-                    )
+                    respuesta = {"estado": "procesado"} if usar_observadores else await asyncio.wait_for(espera_ack, timeout=DEMO_MOVEMENT_ACK_TIMEOUT_S)
                 except asyncio.TimeoutError:
                     logger.warning(
                         "Timeout esperando comando_ack id_vehiculo=%s id_demo=%s "

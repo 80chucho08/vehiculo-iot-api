@@ -166,8 +166,15 @@ async def enviar_comando_y_esperar_ack(
     id_vehiculo: int,
     mensaje: dict[str, Any],
     timeout: float = 3.0,
-) -> dict[str, Any]:
+) -> dict[str, Any] | int:
     id_solicitud = mensaje["id_solicitud"]
+    if websocket_manager.connected_clients(id_vehiculo, "dispositivo") == 0:
+        enviados = await websocket_manager.enviar_a_observadores(id_vehiculo, mensaje)
+        logger.info("Ruta de comando=%s id_vehiculo=%s id_solicitud=%s receptores=%s", "observadores", id_vehiculo, id_solicitud, enviados)
+        if enviados == 0:
+            raise HTTPException(status_code=409, detail="No hay un dispositivo WebSocket conectado.")
+        return enviados
+    logger.info("Ruta de comando=%s id_vehiculo=%s id_solicitud=%s", "dispositivo", id_vehiculo, id_solicitud)
     espera = websocket_manager.crear_espera_ack(id_solicitud)
     logger.info(
         "ACK registrado id_solicitud=%s id_vehiculo=%s tipo=%s timeout_s=%.1f",
@@ -484,11 +491,6 @@ async def ejecutar_comando_individual(id_vehiculo: int, id_comando: int):
                 status_code=409,
                 detail="Ya hay un comando individual pendiente para este vehículo.",
             )
-        if websocket_manager.connected_clients(id_vehiculo, "dispositivo") == 0:
-            raise HTTPException(
-                status_code=409,
-                detail="No hay un dispositivo WebSocket conectado.",
-            )
         demo_execution_manager.individual_commands.add(id_vehiculo)
 
     id_solicitud = str(uuid.uuid4())
@@ -503,7 +505,8 @@ async def ejecutar_comando_individual(id_vehiculo: int, id_comando: int):
 
     try:
         ack = await enviar_comando_y_esperar_ack(id_vehiculo, mensaje)
-        if ack.get("estado") != "procesado":
+        alterno = isinstance(ack, int)
+        if not alterno and ack.get("estado") != "procesado":
             raise HTTPException(
                 status_code=409,
                 detail=ack.get("detalle", "El firmware rechazó el comando."),
@@ -523,11 +526,18 @@ async def ejecutar_comando_individual(id_vehiculo: int, id_comando: int):
                 "id_solicitud": id_solicitud,
                 "id_comando": id_comando,
                 "comando": comando["nombre"],
-                "estado": "procesado_por_firmware",
+                "estado": "entregado_a_observadores" if alterno else "procesado_por_firmware",
                 "mensaje": "El comando se ejecutó correctamente.",
             },
             role="observador",
         )
+        if alterno:
+            return {
+                "mensaje": f"No hay dispositivo conectado; el comando se entregó a {ack} cliente(s) WebSocket.",
+                "id_solicitud": id_solicitud,
+                "estado": "entregado_a_observadores",
+                "resultados": [],
+            }
         return {
             "mensaje": "El firmware aceptó y despachó el comando.",
             "id_solicitud": id_solicitud,
@@ -553,11 +563,6 @@ async def detener_vehiculo(id_vehiculo: int):
                 status_code=409,
                 detail="Hay un comando individual pendiente para este vehículo.",
             )
-        if websocket_manager.connected_clients(id_vehiculo, "dispositivo") == 0:
-            raise HTTPException(
-                status_code=409,
-                detail="No hay un dispositivo WebSocket conectado.",
-            )
         demo_execution_manager.individual_commands.add(id_vehiculo)
 
     id_solicitud = str(uuid.uuid4())
@@ -571,7 +576,8 @@ async def detener_vehiculo(id_vehiculo: int):
     }
     try:
         ack = await enviar_comando_y_esperar_ack(id_vehiculo, mensaje)
-        if ack.get("estado") != "procesado":
+        alterno = isinstance(ack, int)
+        if not alterno and ack.get("estado") != "procesado":
             raise HTTPException(
                 status_code=409,
                 detail=ack.get("detalle", "El firmware rechazó la orden de apagado."),
@@ -582,11 +588,25 @@ async def detener_vehiculo(id_vehiculo: int):
             (id_vehiculo, None, 1),
             (("sp_registrar_historial", (id_vehiculo, None, "interfaz_web")),),
         )
+        if alterno:
+            await websocket_manager.send_to_vehicle(
+                id_vehiculo,
+                {
+                    "tipo": "comando_individual_completado",
+                    "id_vehiculo": id_vehiculo,
+                    "id_solicitud": id_solicitud,
+                    "id_comando": None,
+                    "comando": "APAGAR_TODO",
+                    "estado": "entregado_a_observadores",
+                    "mensaje": "La orden se entregó a observadores habilitados.",
+                },
+                role="observador",
+            )
         return {
-            "mensaje": "El firmware aceptó la orden de apagar todas las salidas.",
+            "mensaje": f"No hay dispositivo conectado; el comando se entregó a {ack} cliente(s) WebSocket." if alterno else "El firmware aceptó la orden de apagar todas las salidas.",
             "id_solicitud": id_solicitud,
-            "estado": "procesado_por_firmware",
-            "resultados": primer_resultado(resultados),
+            "estado": "entregado_a_observadores" if alterno else "procesado_por_firmware",
+            "resultados": [] if alterno else primer_resultado(resultados),
         }
     finally:
         async with demo_execution_manager.lock:

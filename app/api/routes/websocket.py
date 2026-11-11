@@ -46,6 +46,7 @@ async def websocket_vehiculo(
     id_vehiculo: int,
 ):
     rol = websocket.query_params.get("rol", "observador")
+    recibir_comandos = websocket.query_params.get("recibir_comandos") == "1"
     if rol not in {"dispositivo", "observador"}:
         await websocket.close(code=1008)
         return
@@ -58,7 +59,7 @@ async def websocket_vehiculo(
                 reemplazados,
             )
 
-    await websocket_manager.connect(id_vehiculo, websocket, rol)
+    await websocket_manager.connect(id_vehiculo, websocket, rol, recibir_comandos)
 
     try:
         # PyMySQL es síncrono: no bloquear el event loop que recibe los ACK.

@@ -163,6 +163,8 @@ Conecta el ESP8266 con rol de dispositivo. El firmware del vehículo 1 usa:
 wss://vehiculo-iot-itp.duckdns.org/ws/vehiculos/1?rol=dispositivo
 ```
 
+Una interfaz que deba recibir comandos cuando no hay ESP conectado se conecta como `?rol=observador&recibir_comandos=1`. En esa ruta alterna la API envía `comando_individual` a los observadores habilitados, no espera ACK y responde `estado: "entregado_a_observadores"` con `resultados: []`. También publica `comando_individual_completado` con ese estado. La API conserva las llamadas existentes de actualización de estado e historial. Si hay un dispositivo, tiene prioridad y se conserva la espera de ACK; si no hay dispositivo ni observadores habilitados, la API responde 409.
+
 Los clientes de interfaz se conectan con `?rol=observador` (o sin parámetro). El servidor solo entrega mensajes físicos al rol `dispositivo`. Al aceptar la conexión, consulta MySQL y envía `estado_inicial`. El dispositivo envía ACK como mensajes de texto JSON; los ACK indican despacho en el firmware, no una confirmación de sensores físicos.
 
 | `tipo` | Cuándo se envía | Campos principales |

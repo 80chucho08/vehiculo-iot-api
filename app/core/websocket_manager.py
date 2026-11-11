@@ -7,6 +7,7 @@ from fastapi import WebSocket
 class WebSocketManager:
     def __init__(self):
         self.connections: dict[int, dict[WebSocket, str]] = {}
+        self.observer_command_opt_in: set[WebSocket] = set()
         self.pending_acks: dict[str, asyncio.Future[dict]] = {}
         self.pending_demo_acks: dict[int, asyncio.Future[dict]] = {}
 
@@ -15,6 +16,7 @@ class WebSocketManager:
         id_vehiculo: int,
         websocket: WebSocket,
         role: str = "observador",
+        recibir_comandos: bool = False,
     ):
         await websocket.accept()
 
@@ -22,6 +24,8 @@ class WebSocketManager:
             self.connections[id_vehiculo] = {}
 
         self.connections[id_vehiculo][websocket] = role
+        if role == "observador" and recibir_comandos:
+            self.observer_command_opt_in.add(websocket)
 
     def disconnect(
         self,
@@ -34,6 +38,7 @@ class WebSocketManager:
             return
 
         clientes.pop(websocket, None)
+        self.observer_command_opt_in.discard(websocket)
 
         if not clientes:
             self.connections.pop(id_vehiculo, None)
@@ -58,6 +63,24 @@ class WebSocketManager:
         if role is None:
             return len(clientes)
         return sum(1 for cliente_role in clientes.values() if cliente_role == role)
+
+    def observer_connections(self, id_vehiculo: int) -> list[WebSocket]:
+        return [
+            websocket
+            for websocket, role in self.connections.get(id_vehiculo, {}).items()
+            if role == "observador" and websocket in self.observer_command_opt_in
+        ]
+
+    async def enviar_a_observadores(self, id_vehiculo: int, mensaje: dict) -> int:
+        clientes = self.observer_connections(id_vehiculo)
+        enviados = 0
+        for websocket in clientes:
+            try:
+                await websocket.send_json(mensaje)
+                enviados += 1
+            except Exception:
+                self.disconnect(id_vehiculo, websocket)
+        return enviados
 
     async def send_to_vehicle(
         self,

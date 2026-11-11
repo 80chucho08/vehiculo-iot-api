@@ -341,6 +341,39 @@ class AsyncCommandFlowTests(unittest.IsolatedAsyncioTestCase):
             3.0,
         )
 
+    async def test_observer_fallback_requires_opt_in_and_delivers_without_ack(self):
+        observer = FakeWebSocket()
+        await websocket_manager.connect(21, observer, "observador", recibir_comandos=True)
+        mensaje = {"tipo": "comando_individual", "id_vehiculo": 21, "id_solicitud": "fallback", "codigo": 0, "comando": "APAGAR_TODO"}
+        enviados = await operaciones.enviar_comando_y_esperar_ack(21, mensaje)
+        self.assertEqual(enviados, 1)
+        self.assertEqual(observer.sent, [mensaje])
+        self.assertNotIn("fallback", websocket_manager.pending_acks)
+
+    async def test_no_device_and_no_opted_observer_keeps_409(self):
+        observer = FakeWebSocket()
+        await websocket_manager.connect(22, observer, "observador")
+        with self.assertRaises(HTTPException) as error:
+            await operaciones.enviar_comando_y_esperar_ack(
+                22,
+                {"tipo": "comando_individual", "id_vehiculo": 22, "id_solicitud": "none"},
+            )
+        self.assertEqual(error.exception.status_code, 409)
+        self.assertEqual(observer.sent, [])
+
+    async def test_device_has_priority_over_opted_observer(self):
+        observer = FakeWebSocket()
+        await websocket_manager.connect(23, observer, "observador", recibir_comandos=True)
+        async def acknowledge(mensaje):
+            websocket_manager.resolver_ack(mensaje["id_solicitud"], {"estado": "procesado"})
+        device = FakeWebSocket(acknowledge)
+        await websocket_manager.connect(23, device, "dispositivo")
+        mensaje = {"tipo": "comando_individual", "id_vehiculo": 23, "id_solicitud": "device", "codigo": 1}
+        respuesta = await operaciones.enviar_comando_y_esperar_ack(23, mensaje)
+        self.assertEqual(respuesta["estado"], "procesado")
+        self.assertEqual(device.sent, [mensaje])
+        self.assertEqual(observer.sent, [])
+
 
 if __name__ == "__main__":
     unittest.main()
