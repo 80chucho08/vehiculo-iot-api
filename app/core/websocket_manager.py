@@ -68,7 +68,7 @@ class WebSocketManager:
         return [
             websocket
             for websocket, role in self.connections.get(id_vehiculo, {}).items()
-            if role == "observador" and websocket in self.observer_command_opt_in
+            if role == "observador"
         ]
 
     def observer_connections(self, id_vehiculo: int) -> list[WebSocket]:

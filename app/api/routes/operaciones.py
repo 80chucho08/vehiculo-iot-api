@@ -556,7 +556,11 @@ async def ejecutar_comando_individual(id_vehiculo: int, id_comando: int):
                 "id_comando": id_comando,
                 "comando": comando["nombre"],
                 "estado": "entregado_a_observadores" if alterno else "procesado_por_firmware",
-                "mensaje": "El comando se ejecutó correctamente.",
+                "mensaje": (
+                    "El comando se entregó a observadores; sin confirmación de firmware."
+                    if alterno
+                    else "El comando se ejecutó correctamente."
+                ),
             },
             role="observador",
         )
@@ -627,7 +631,7 @@ async def detener_vehiculo(id_vehiculo: int):
                     "id_comando": None,
                     "comando": "APAGAR_TODO",
                     "estado": "entregado_a_observadores",
-                    "mensaje": "La orden se entregó a observadores habilitados.",
+                    "mensaje": "El comando se entregó a observadores; sin confirmación de firmware.",
                 },
                 role="observador",
             )

@@ -333,7 +333,15 @@ class DemoExecutionManager:
                 if usar_observadores:
                     receptores_vivos = websocket_manager.receptores(id_vehiculo)
                     if receptores_vivos:
-                        enviados = await websocket_manager.enviar_a_observadores(id_vehiculo, mensaje)
+                        mensaje_individual = {
+                            "tipo": "comando_individual",
+                            "id_vehiculo": id_vehiculo,
+                            "id_solicitud": id_solicitud,
+                            "id_comando": movimiento["id_comando"],
+                            "comando": movimiento["comando"],
+                            "codigo": movimiento["codigo"],
+                        }
+                        enviados = await websocket_manager.enviar_a_observadores(id_vehiculo, mensaje_individual)
                         if enviados > 0:
                             logger.info(
                                 "Ruta de comando=%s id_vehiculo=%s receptores=%s id_solicitud=%s",
@@ -341,6 +349,19 @@ class DemoExecutionManager:
                                 id_vehiculo,
                                 enviados,
                                 id_solicitud,
+                            )
+                            await websocket_manager.send_to_vehicle(
+                                id_vehiculo,
+                                {
+                                    "tipo": "comando_individual_completado",
+                                    "id_vehiculo": id_vehiculo,
+                                    "id_solicitud": id_solicitud,
+                                    "id_comando": movimiento["id_comando"],
+                                    "comando": movimiento["comando"],
+                                    "estado": "entregado_a_observadores",
+                                    "mensaje": "El comando se entregó a observadores; sin confirmación de firmware.",
+                                },
+                                role="observador",
                             )
                         else:
                             logger.info(

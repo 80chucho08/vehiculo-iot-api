@@ -142,8 +142,8 @@ Al conectarse al WebSocket, los clientes declaran su función usando query param
 | Rol | Query Parameter | Descripción |
 | :--- | :--- | :--- |
 | **Dispositivo** | `?rol=dispositivo` | Reservado para el **microcontrolador físico**. Recibe los comandos físicos y envía confirmaciones (`comando_ack`, `demo_ack`). Si se conecta un nuevo dispositivo con el mismo ID, la conexión previa se cierra limpiamente (código `1012`). |
-| **Observador** | `?rol=observador` *(por defecto)* | Usado por **interfaces web o paneles de supervisión**. Recibe notificaciones de estado y eventos de progreso en tiempo real. |
-| **Observador (Fallback)** | `?rol=observador&recibir_comandos=1` | Permite a una interfaz web recibir comandos en modo simulación cuando no hay un dispositivo físico conectado. |
+| **Observador** | `?rol=observador` *(por defecto)* | Usado por **interfaces web o paneles de supervisión**. Recibe notificaciones de estado y eventos en tiempo real. En la ruta alterna (sin dispositivo), recibe los mensajes `comando_individual` para pruebas y simulación sin requerir flags adicionales. |
+| **Observador (Compatibilidad)** | `?rol=observador&recibir_comandos=1` | Parámetro aceptado por compatibilidad histórica; ya no es necesario para recibir comandos en la ruta alterna. |
 
 ---
 
@@ -256,28 +256,26 @@ Las demos son secuencias de movimientos almacenadas en MySQL que se ejecutan sec
 
 ---
 
-### 3. Modo Fallback y Observadores Receptores (Ruta Alterna sin Hardware)
+### 3. Modo Fallback y Ruta Alterna (Sin Dispositivo Físico)
 
-Cuando se prueba la plataforma, se desarrolla el frontend o el vehículo físico (ESP) no está conectado, el sistema cuenta con un mecanismo de **ruta alterna** para no bloquear la ejecución de comandos ni de detención:
+Cuando se prueba la plataforma, se desarrolla el frontend o el vehículo físico (ESP) no está conectado, el sistema cuenta con un mecanismo de **ruta alterna** para no bloquear la ejecución de comandos, la detención ni las demos:
 
-#### Regla de Receptores (Opt-in)
-- Un cliente observador **solo** se considera receptor si se conecta explícitamente con el parámetro `recibir_comandos=1`:
-  ```text
-  ws://localhost:8000/ws/vehiculos/{id_vehiculo}?rol=observador&recibir_comandos=1
-  # O en producción sobre SSL:
-  wss://vehiculo-iot-itp.duckdns.org/ws/vehiculos/{id_vehiculo}?rol=observador&recibir_comandos=1
-  ```
-- Los observadores comunes (`?rol=observador` o sin parámetros) **no** reciben los mensajes físicos de comando, protegiendo las interfaces de usuario normales de sobrecarga innecesaria.
+> [!NOTE]
+> **Ya no hace falta `?recibir_comandos=1`**: ahora todos los observadores conectados al vehículo (con o sin parámetros en `/ws/vehiculos/{id}`) reciben los mensajes de comando en la ruta alterna. El parámetro se mantiene aceptado únicamente por compatibilidad hacia atrás sin alterar el comportamiento.
 
-#### Comportamiento de Envío:
+#### Los Tres Escenarios de Despacho:
+
 1. **Con Dispositivo Conectado:**
    - La orden física se despacha prioritariamente al microcontrolador (`rol=dispositivo`).
    - Se espera el `comando_ack` hasta por 3.0 segundos.
+   - Los observadores **no** reciben `comando_individual`; únicamente reciben el evento de finalización `comando_individual_completado` con `"mensaje": "El comando se ejecutó correctamente."`.
    - Responde HTTP 200 con `"estado": "procesado_por_firmware"`.
-   - Si la conexión con el dispositivo falla o el socket se encuentra muerto durante el envío, el socket se descarta automáticamente y la petición cae **en la misma llamada** a los observadores receptores.
-2. **Sin Dispositivo pero con Observadores Receptores:**
-   - Se despacha a los receptores el mismo payload JSON `"comando_individual"` que recibiría el hardware.
+   - Si la conexión con el dispositivo falla o el socket se encuentra muerto durante el envío, el socket se descarta automáticamente del gestor y la petición continúa **en la misma llamada** hacia la ruta alterna.
+
+2. **Sin Dispositivo pero con al menos un Observador Conectado:**
+   - Se despacha a **todos los observadores conectados** el mensaje JSON `"comando_individual"`.
    - **No se espera ACK** de vuelta.
+   - Inmediatamente después, se publica a los observadores el evento `"comando_individual_completado"` con el texto `"El comando se entregó a observadores; sin confirmación de firmware."` (tanto para comandos estándar como para `APAGAR_TODO` y movimientos de demo).
    - Responde HTTP 200 con estado `"entregado_a_observadores"`:
      ```json
      {
@@ -287,9 +285,10 @@ Cuando se prueba la plataforma, se desarrolla el frontend o el vehículo físico
        "resultados": []
      }
      ```
-   - Se publica el evento WebSocket `comando_individual_completado` con `"estado": "entregado_a_observadores"` a los observadores.
-3. **Sin Dispositivo ni Receptores:**
-   - Responde HTTP 409 con el detalle:
+   - **Aviso de telemetría:** El estado `"entregado_a_observadores"` indica entrega a clientes WebSocket observadores conectados; **no representa una confirmación de ejecución física** en motores o sensores.
+
+3. **Sin Dispositivo ni Observadores Conectados:**
+   - Responde HTTP 409 Conflict:
      ```json
      {
        "detail": "No hay un dispositivo WebSocket conectado."

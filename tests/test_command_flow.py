@@ -341,25 +341,22 @@ class AsyncCommandFlowTests(unittest.IsolatedAsyncioTestCase):
             3.0,
         )
 
-    async def test_observer_fallback_requires_opt_in_and_delivers_without_ack(self):
+    async def test_observer_receives_command_without_opt_in(self):
         observer = FakeWebSocket()
-        await websocket_manager.connect(21, observer, "observador", recibir_comandos=True)
+        await websocket_manager.connect(21, observer, "observador")
         mensaje = {"tipo": "comando_individual", "id_vehiculo": 21, "id_solicitud": "fallback", "codigo": 0, "comando": "APAGAR_TODO"}
         enviados = await operaciones.enviar_comando_y_esperar_ack(21, mensaje)
         self.assertEqual(enviados, 1)
         self.assertEqual(observer.sent, [mensaje])
         self.assertNotIn("fallback", websocket_manager.pending_acks)
 
-    async def test_no_device_and_no_opted_observer_keeps_409(self):
-        observer = FakeWebSocket()
-        await websocket_manager.connect(22, observer, "observador")
+    async def test_no_device_and_no_observer_keeps_409(self):
         with self.assertRaises(HTTPException) as error:
             await operaciones.enviar_comando_y_esperar_ack(
                 22,
                 {"tipo": "comando_individual", "id_vehiculo": 22, "id_solicitud": "none"},
             )
         self.assertEqual(error.exception.status_code, 409)
-        self.assertEqual(observer.sent, [])
 
     async def test_device_has_priority_over_opted_observer(self):
         observer = FakeWebSocket()
@@ -374,114 +371,202 @@ class AsyncCommandFlowTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(device.sent, [mensaje])
         self.assertEqual(observer.sent, [])
 
-    # Pruebas requeridas para los escenarios (a) a (f)
+    # Pruebas con sockets simulados para la ruta alterna sin dispositivo (todos los observadores)
 
-    async def test_scenarios_ejecutar_comando_individual(self):
+    async def test_with_device_observers_do_not_receive_comando_individual(self):
         command = {"id_comando": 3, "nombre": "Avanzar", "codigo": 1}
-
-        # (a) Con dispositivo
         async def ack(mensaje):
             websocket_manager.resolver_ack(mensaje["id_solicitud"], {"estado": "procesado"})
         device = FakeWebSocket(ack)
-        await websocket_manager.connect(31, device, "dispositivo")
+        observer = FakeWebSocket()
+        await websocket_manager.connect(51, device, "dispositivo")
+        await websocket_manager.connect(51, observer, "observador")
+
         with patch.object(operaciones, "validar_comando_individual", return_value=command), \
              patch.object(operaciones, "ejecutar_operacion", return_value=[[]]):
-            res_a = await operaciones.ejecutar_comando_individual(31, 3)
-        self.assertEqual(res_a["estado"], "procesado_por_firmware")
+            res = await operaciones.ejecutar_comando_individual(51, 3)
 
-        # (b) Sin dispositivo y con receptor
-        receiver = FakeWebSocket()
-        await websocket_manager.connect(32, receiver, "observador", recibir_comandos=True)
+        self.assertEqual(res["estado"], "procesado_por_firmware")
+        self.assertTrue(any(m.get("tipo") == "comando_individual" for m in device.sent))
+        # Observador NO debe recibir comando_individual
+        self.assertFalse(any(m.get("tipo") == "comando_individual" for m in observer.sent))
+        # Observador solo recibe el evento de finalización
+        self.assertTrue(any(m.get("tipo") == "comando_individual_completado" for m in observer.sent))
+        evento = next(m for m in observer.sent if m.get("tipo") == "comando_individual_completado")
+        self.assertEqual(evento["mensaje"], "El comando se ejecutó correctamente.")
+
+    async def test_without_device_observer_without_params_receives_200(self):
+        command = {"id_comando": 3, "nombre": "Avanzar", "codigo": 1}
+        observer = FakeWebSocket()
+        # Conexión por defecto, sin parámetros adicionales
+        await websocket_manager.connect(52, observer, "observador")
+
         with patch.object(operaciones, "validar_comando_individual", return_value=command), \
              patch.object(operaciones, "ejecutar_operacion", return_value=[[]]):
-            res_b = await operaciones.ejecutar_comando_individual(32, 3)
-        self.assertEqual(res_b["estado"], "entregado_a_observadores")
-        self.assertEqual(res_b["resultados"], [])
-        self.assertTrue(any(m.get("tipo") == "comando_individual" for m in receiver.sent))
+            res = await operaciones.ejecutar_comando_individual(52, 3)
 
-        # (c) Sin dispositivo y con observador no receptor -> 409
-        non_receiver = FakeWebSocket()
-        await websocket_manager.connect(33, non_receiver, "observador", recibir_comandos=False)
+        self.assertEqual(res["estado"], "entregado_a_observadores")
+        self.assertEqual(res["mensaje"], "No hay dispositivo conectado; el comando se entregó a 1 cliente(s) WebSocket.")
+        self.assertEqual(res["resultados"], [])
+        self.assertTrue(any(m.get("tipo") == "comando_individual" for m in observer.sent))
+
+    async def test_without_device_observer_with_recibir_comandos_receives_200(self):
+        command = {"id_comando": 3, "nombre": "Avanzar", "codigo": 1}
+        observer = FakeWebSocket()
+        await websocket_manager.connect(53, observer, "observador", recibir_comandos=True)
+
+        with patch.object(operaciones, "validar_comando_individual", return_value=command), \
+             patch.object(operaciones, "ejecutar_operacion", return_value=[[]]):
+            res = await operaciones.ejecutar_comando_individual(53, 3)
+
+        self.assertEqual(res["estado"], "entregado_a_observadores")
+        self.assertEqual(res["resultados"], [])
+        self.assertTrue(any(m.get("tipo") == "comando_individual" for m in observer.sent))
+
+    async def test_without_anyone_returns_409(self):
+        command = {"id_comando": 3, "nombre": "Avanzar", "codigo": 1}
         with patch.object(operaciones, "validar_comando_individual", return_value=command):
-            with self.assertRaises(HTTPException) as ctx_c:
-                await operaciones.ejecutar_comando_individual(33, 3)
-        self.assertEqual(ctx_c.exception.status_code, 409)
-        self.assertEqual(ctx_c.exception.detail, "No hay un dispositivo WebSocket conectado.")
+            with self.assertRaises(HTTPException) as ctx:
+                await operaciones.ejecutar_comando_individual(54, 3)
+        self.assertEqual(ctx.exception.status_code, 409)
+        self.assertEqual(ctx.exception.detail, "No hay un dispositivo WebSocket conectado.")
 
-        # (d) Sin nadie -> 409
-        with patch.object(operaciones, "validar_comando_individual", return_value=command):
-            with self.assertRaises(HTTPException) as ctx_d:
-                await operaciones.ejecutar_comando_individual(34, 3)
-        self.assertEqual(ctx_d.exception.status_code, 409)
-        self.assertEqual(ctx_d.exception.detail, "No hay un dispositivo WebSocket conectado.")
-
-        # (e) Dispositivo muerto más receptor -> debe caer a la ruta alterna
+    async def test_dead_device_with_observer_falls_back_to_alternate_route(self):
+        command = {"id_comando": 3, "nombre": "Avanzar", "codigo": 1}
         class DeadWebSocket(FakeWebSocket):
             async def send_json(self, _):
-                raise ConnectionResetError("Socket cerrado abruptamente")
+                raise ConnectionResetError("Socket cerrado")
 
         dead_device = DeadWebSocket()
-        receiver_e = FakeWebSocket()
-        await websocket_manager.connect(35, dead_device, "dispositivo")
-        await websocket_manager.connect(35, receiver_e, "observador", recibir_comandos=True)
+        observer = FakeWebSocket()
+        await websocket_manager.connect(55, dead_device, "dispositivo")
+        await websocket_manager.connect(55, observer, "observador")
+
         with patch.object(operaciones, "validar_comando_individual", return_value=command), \
              patch.object(operaciones, "ejecutar_operacion", return_value=[[]]):
-            res_e = await operaciones.ejecutar_comando_individual(35, 3)
-        self.assertEqual(res_e["estado"], "entregado_a_observadores")
-        self.assertEqual(res_e["resultados"], [])
-        self.assertTrue(any(m.get("tipo") == "comando_individual" for m in receiver_e.sent))
+            res = await operaciones.ejecutar_comando_individual(55, 3)
+
+        self.assertEqual(res["estado"], "entregado_a_observadores")
+        self.assertEqual(res["resultados"], [])
+        self.assertTrue(any(m.get("tipo") == "comando_individual" for m in observer.sent))
+
+    async def test_order_and_event_message_text_alternate_route(self):
+        command = {"id_comando": 3, "nombre": "Avanzar", "codigo": 1}
+        observer = FakeWebSocket()
+        await websocket_manager.connect(56, observer, "observador")
+
+        with patch.object(operaciones, "validar_comando_individual", return_value=command), \
+             patch.object(operaciones, "ejecutar_operacion", return_value=[[]]):
+            await operaciones.ejecutar_comando_individual(56, 3)
+
+        self.assertEqual(len(observer.sent), 2)
+        # Primero comando_individual
+        self.assertEqual(observer.sent[0]["tipo"], "comando_individual")
+        self.assertEqual(observer.sent[0]["codigo"], 1)
+        # Después comando_individual_completado
+        self.assertEqual(observer.sent[1]["tipo"], "comando_individual_completado")
+        self.assertEqual(observer.sent[1]["estado"], "entregado_a_observadores")
+        self.assertEqual(
+            observer.sent[1]["mensaje"],
+            "El comando se entregó a observadores; sin confirmación de firmware.",
+        )
+        self.assertNotIn("se ejecutó correctamente", observer.sent[1]["mensaje"])
 
     async def test_scenarios_detener_vehiculo(self):
-        # (f.a) Detener con dispositivo
+        # Con dispositivo
         async def ack(mensaje):
             websocket_manager.resolver_ack(mensaje["id_solicitud"], {"estado": "procesado"})
         device = FakeWebSocket(ack)
-        await websocket_manager.connect(41, device, "dispositivo")
+        observer_a = FakeWebSocket()
+        await websocket_manager.connect(61, device, "dispositivo")
+        await websocket_manager.connect(61, observer_a, "observador")
         with patch.object(operaciones, "ejecutar_operacion", return_value=[[]]):
-            res_fa = await operaciones.detener_vehiculo(41)
-        self.assertEqual(res_fa["estado"], "procesado_por_firmware")
+            res_a = await operaciones.detener_vehiculo(61)
+        self.assertEqual(res_a["estado"], "procesado_por_firmware")
+        self.assertFalse(any(m.get("tipo") == "comando_individual" for m in observer_a.sent))
 
-        # (f.b) Detener sin dispositivo y con receptor
-        receiver = FakeWebSocket()
-        await websocket_manager.connect(42, receiver, "observador", recibir_comandos=True)
+        # Sin dispositivo con observador sin parámetros
+        observer_b = FakeWebSocket()
+        await websocket_manager.connect(62, observer_b, "observador")
         with patch.object(operaciones, "ejecutar_operacion", return_value=[[]]):
-            res_fb = await operaciones.detener_vehiculo(42)
-        self.assertEqual(res_fb["estado"], "entregado_a_observadores")
-        self.assertEqual(res_fb["resultados"], [])
-        msg_stop = next(m for m in receiver.sent if m.get("tipo") == "comando_individual")
-        self.assertEqual(msg_stop["codigo"], 0)
-        self.assertEqual(msg_stop["comando"], "APAGAR_TODO")
+            res_b = await operaciones.detener_vehiculo(62)
+        self.assertEqual(res_b["estado"], "entregado_a_observadores")
+        self.assertEqual(len(observer_b.sent), 2)
+        self.assertEqual(observer_b.sent[0]["tipo"], "comando_individual")
+        self.assertEqual(observer_b.sent[0]["codigo"], 0)
+        self.assertEqual(observer_b.sent[0]["comando"], "APAGAR_TODO")
+        self.assertEqual(observer_b.sent[1]["tipo"], "comando_individual_completado")
+        self.assertEqual(
+            observer_b.sent[1]["mensaje"],
+            "El comando se entregó a observadores; sin confirmación de firmware.",
+        )
 
-        # (f.c) Detener sin dispositivo y con observador no receptor -> 409
-        non_receiver = FakeWebSocket()
-        await websocket_manager.connect(43, non_receiver, "observador", recibir_comandos=False)
-        with self.assertRaises(HTTPException) as ctx_fc:
-            await operaciones.detener_vehiculo(43)
-        self.assertEqual(ctx_fc.exception.status_code, 409)
-        self.assertEqual(ctx_fc.exception.detail, "No hay un dispositivo WebSocket conectado.")
+        # Sin nadie -> 409
+        with self.assertRaises(HTTPException) as ctx_d:
+            await operaciones.detener_vehiculo(63)
+        self.assertEqual(ctx_d.exception.status_code, 409)
 
-        # (f.d) Detener sin nadie -> 409
-        with self.assertRaises(HTTPException) as ctx_fd:
-            await operaciones.detener_vehiculo(44)
-        self.assertEqual(ctx_fd.exception.status_code, 409)
-        self.assertEqual(ctx_fd.exception.detail, "No hay un dispositivo WebSocket conectado.")
-
-        # (f.e) Detener con dispositivo muerto más receptor -> cae a ruta alterna
+        # Dispositivo muerto + observador -> ruta alterna
         class DeadWebSocket(FakeWebSocket):
             async def send_json(self, _):
-                raise ConnectionResetError("Socket cerrado abruptamente")
-
+                raise ConnectionResetError("Socket cerrado")
         dead_device = DeadWebSocket()
-        receiver_fe = FakeWebSocket()
-        await websocket_manager.connect(45, dead_device, "dispositivo")
-        await websocket_manager.connect(45, receiver_fe, "observador", recibir_comandos=True)
+        observer_e = FakeWebSocket()
+        await websocket_manager.connect(64, dead_device, "dispositivo")
+        await websocket_manager.connect(64, observer_e, "observador")
         with patch.object(operaciones, "ejecutar_operacion", return_value=[[]]):
-            res_fe = await operaciones.detener_vehiculo(45)
-        self.assertEqual(res_fe["estado"], "entregado_a_observadores")
-        self.assertEqual(res_fe["resultados"], [])
-        msg_stop_e = next(m for m in receiver_fe.sent if m.get("tipo") == "comando_individual")
-        self.assertEqual(msg_stop_e["codigo"], 0)
-        self.assertEqual(msg_stop_e["comando"], "APAGAR_TODO")
+            res_e = await operaciones.detener_vehiculo(64)
+        self.assertEqual(res_e["estado"], "entregado_a_observadores")
+        self.assertEqual(observer_e.sent[0]["tipo"], "comando_individual")
+        self.assertEqual(observer_e.sent[1]["tipo"], "comando_individual_completado")
+        self.assertEqual(
+            observer_e.sent[1]["mensaje"],
+            "El comando se entregó a observadores; sin confirmación de firmware.",
+        )
+
+    async def test_demo_alternate_route_order_and_event(self):
+        observer = FakeWebSocket()
+        await websocket_manager.connect(71, observer, "observador")
+        demo = {"id_demo": 5, "nombre": "Demo Test", "activo": 1}
+        movimiento = {
+            "id_demo_movimiento": 101,
+            "orden": 1,
+            "id_comando": 2,
+            "comando": "Retroceder",
+            "codigo": 2,
+            "duracion_ms": 100,
+            "pausa_ms": 50,
+        }
+        sleeps = []
+        async def mock_sleep(s):
+            sleeps.append(s)
+
+        with patch.object(demo_executor, "cargar_datos_demo", return_value=(demo, [movimiento])), \
+             patch.object(demo_executor.asyncio, "sleep", new=mock_sleep), \
+             patch.object(demo_executor, "ejecutar_operacion", return_value=[[]]):
+            await demo_executor.demo_execution_manager.iniciar(71, 5)
+            tarea = demo_executor.demo_execution_manager.tasks.get(71)
+            if tarea:
+                await tarea
+
+        tipos = [m.get("tipo") for m in observer.sent]
+        self.assertIn("demo_iniciada", tipos)
+        self.assertIn("comando_individual", tipos)
+        self.assertIn("comando_individual_completado", tipos)
+        self.assertIn("demo_completada", tipos)
+
+        idx_cmd = tipos.index("comando_individual")
+        idx_comp = tipos.index("comando_individual_completado")
+        # El comando se envía ANTES del completado
+        self.assertLess(idx_cmd, idx_comp)
+
+        msg_comp = observer.sent[idx_comp]
+        self.assertEqual(msg_comp["estado"], "entregado_a_observadores")
+        self.assertEqual(
+            msg_comp["mensaje"],
+            "El comando se entregó a observadores; sin confirmación de firmware.",
+        )
+        self.assertEqual(sleeps, [0.1, 0.05])
 
 
 if __name__ == "__main__":
