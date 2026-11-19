@@ -41,7 +41,7 @@ def soporte_vigente(id_vehiculo: int, id_admin: int) -> dict[str, Any] | None:
 
 
 _COLUMNAS_UNIDAD = (
-    "v.id_vehiculo, v.nombre, v.numero_serie, v.tipo_unidad, v.activo, v.microcontrolador, "
+    "v.id_vehiculo, v.nombre, v.numero_serie, v.tipo_unidad, v.activo, v.microcontrolador, v.descripcion, "
     "m.id_modelo, m.nombre AS modelo, "
     "e.conectado, e.fecha_actualizacion, c.nombre AS ultimo_comando, c.codigo AS ultimo_codigo"
 )
@@ -57,6 +57,8 @@ def mis_vehiculos(id_usuario: int) -> list[dict[str, Any]]:
     """Solo las unidades con asignación VIGENTE al usuario (el id sale del token, nunca del cliente)."""
     return todas(
         f"SELECT {_COLUMNAS_UNIDAD}, a.inicio AS asignado_desde, "
+        # Sin historial, estado_vehiculo.id_comando NULL NO significa DETENER: la unidad no se ha movido.
+        "       EXISTS(SELECT 1 FROM historial_comandos h WHERE h.id_vehiculo = v.id_vehiculo) AS con_historial, "
         "       (SELECT MAX(s.expira_en) FROM autorizaciones_soporte s "
         "         WHERE s.id_vehiculo = v.id_vehiculo AND s.revocada_en IS NULL "
         "           AND s.expira_en > UTC_TIMESTAMP()) AS soporte_hasta "

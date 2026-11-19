@@ -236,6 +236,28 @@ class RolesYRutasTests(BaseApi):
         self.assertEqual(r.status_code, 404)
         self.assertIn(("vehiculo.baja", "error"), self.acciones_auditadas())
 
+    def test_rutas_de_inventario_comercial(self):
+        """Modelos, alta de unidades y permisos de comandos (regresión: el nombre de una ruta tapaba al módulo)."""
+        from app.api.routes import admin
+        from app.repositories.base import Conflicto
+        with patch.object(admin.inventario, "listar_modelos", return_value=[{"id_modelo": 1}]), \
+             patch.object(admin.inventario, "crear_unidad", return_value={"id_vehiculo": 9, "plantilla": 1, "comandos_copiados": 13, "demos_copiadas": 1}), \
+             patch.object(admin.inventario, "actualizar_permisos_comando", side_effect=Conflicto("Solo los movimientos 1-12")), \
+             patch("app.api.routes.admin.auditar"):
+            self.assertEqual(self.cliente.get("/api/admin/modelos", headers=cabecera(ADMIN)).json()["total"], 1)
+            alta = self.cliente.post("/api/admin/unidades", headers=cabecera(ADMIN),
+                                     json={"nombre": "U", "id_modelo": 1, "numero_serie": "CJ-0009"})
+            self.assertEqual((alta.status_code, alta.json()["comandos_copiados"]), (201, 13))
+            serie_mala = self.cliente.post("/api/admin/unidades", headers=cabecera(ADMIN),
+                                           json={"nombre": "U", "id_modelo": 1, "numero_serie": "cj 9"})
+            self.assertEqual(serie_mala.status_code, 422)
+            r = self.cliente.put("/api/admin/comandos/13", headers=cabecera(ADMIN),
+                                 json={"activo": True, "permitido_invitado": True, "duracion_max_ms": None})
+            self.assertEqual(r.status_code, 409)
+            self.assertEqual(self.cliente.get("/api/admin/modelos", headers=cabecera(USER_A)).status_code, 403)
+        with patch("app.api.routes.admin.propiedad.inventario", return_value=[{"id_vehiculo": 1}]):
+            self.assertEqual(self.cliente.get("/api/admin/inventario", headers=cabecera(ADMIN)).json()["total"], 1)
+
     def test_mis_vehiculos_solo_para_compradores(self):
         self.assertEqual(self.cliente.get("/api/mis-vehiculos").status_code, 401)
         self.assertEqual(self.cliente.get("/api/mis-vehiculos", headers=cabecera(ADMIN)).status_code, 403)

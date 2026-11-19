@@ -40,7 +40,11 @@
 | `POST /api/admin/usuarios` `{email, nombre, password, rol}` | admin | 201 · 409 email repetido · 422 |
 | `PUT /api/admin/usuarios/{id}` `{nombre, rol, activo}` | admin | 200 · 404 · 409 último admin |
 | `PUT /api/admin/usuarios/{id}/password` `{password}` | admin | 204 (recuperación de acceso) · 404 |
-| `GET /api/admin/inventario` | admin | 200 |
+| `GET /api/admin/inventario` | admin | 200 (unidad, modelo, serie, tipo, comprador, dispositivo en línea) |
+| `GET /api/admin/modelos` · `POST` · `PUT /{id}` | admin | 200/201 · 404 · 409 nombre repetido · 422 límites (100–10 000 ms, 1–50 pasos) |
+| `POST /api/admin/unidades` `{nombre, id_modelo, numero_serie, tipo_unidad}` | admin | 201 `{id_vehiculo, plantilla, comandos_copiados, demos_copiadas}` · 404 modelo · 409 serie repetida o modelo inactivo · 422 |
+| `PUT /api/admin/unidades/{id}` | admin | 200 · 404 · 409 (unidad vendida: no cambia de tipo ni se da de baja) |
+| `PUT /api/admin/comandos/{id}` `{activo, permitido_invitado, duracion_max_ms}` | admin | 200 · 404 · 409 (solo códigos 1–12 para invitados) |
 | `GET /api/admin/asignaciones?pagina&…&vigentes` | admin | 200 paginado |
 | `POST /api/admin/asignaciones` `{id_vehiculo, id_usuario}` | admin | 201 · 404 · 409 (ya asignada, exhibición, baja, no es comprador) |
 | `POST /api/admin/asignaciones/{id}/finalizar` `{motivo}` | admin | 200 · 404 · 409 (revoca el soporte vigente) |
