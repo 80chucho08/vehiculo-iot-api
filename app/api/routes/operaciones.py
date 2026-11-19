@@ -5,14 +5,16 @@ import uuid
 from typing import Any
 
 import pymysql
-from fastapi import APIRouter, HTTPException
+from fastapi import APIRouter, Depends, HTTPException
 from pydantic import BaseModel, Field
 
+from app.api.deps import acceso_vehiculo, admin_auditado
 from app.core.websocket_manager import websocket_manager
 from app.db.bajas_logicas import desactivar_comando, desactivar_vehiculo
 from app.db.connection import get_connection
 from app.db.operation_executor import ejecutar_operacion
 from app.db.procedure_executor import execute_procedure
+from app.services.autorizacion import Accion
 from app.services.demo_executor import demo_execution_manager
 
 
@@ -258,7 +260,7 @@ async def enviar_comando_y_esperar_ack(
 
 # VEHÍCULOS
 
-@router.post("/vehiculos", status_code=201)
+@router.post("/vehiculos", status_code=201, dependencies=[Depends(admin_auditado("vehiculo.alta", "vehiculo"))])
 def crear_vehiculo(datos: VehiculoCrear):
     resultados = ejecutar_operacion(
         "sp_crear_vehiculo",
@@ -276,7 +278,7 @@ def crear_vehiculo(datos: VehiculoCrear):
     }
 
 
-@router.put("/vehiculos/{id_vehiculo}")
+@router.put("/vehiculos/{id_vehiculo}", dependencies=[Depends(admin_auditado("vehiculo.actualizar", "vehiculo", "id_vehiculo"))])
 def actualizar_vehiculo(
     id_vehiculo: int,
     datos: VehiculoActualizar,
@@ -299,7 +301,7 @@ def actualizar_vehiculo(
     }
 
 
-@router.delete("/vehiculos/{id_vehiculo}")
+@router.delete("/vehiculos/{id_vehiculo}", dependencies=[Depends(admin_auditado("vehiculo.baja", "vehiculo", "id_vehiculo"))])
 def eliminar_vehiculo(id_vehiculo: int):
     """Baja lógica: marca activo = 0 y conserva comandos, demos e historial."""
     try:
@@ -327,7 +329,7 @@ def eliminar_vehiculo(id_vehiculo: int):
 
 # COMANDOS
 
-@router.post("/vehiculos/{id_vehiculo}/comandos", status_code=201)
+@router.post("/vehiculos/{id_vehiculo}/comandos", status_code=201, dependencies=[Depends(admin_auditado("comando.crear", "vehiculo", "id_vehiculo"))])
 def crear_comando(
     id_vehiculo: int,
     datos: ComandoCrear,
@@ -348,7 +350,7 @@ def crear_comando(
     }
 
 
-@router.put("/comandos/{id_comando}")
+@router.put("/comandos/{id_comando}", dependencies=[Depends(admin_auditado("comando.actualizar", "comando", "id_comando"))])
 def actualizar_comando(
     id_comando: int,
     datos: ComandoActualizar,
@@ -370,7 +372,7 @@ def actualizar_comando(
     }
 
 
-@router.delete("/comandos/{id_comando}")
+@router.delete("/comandos/{id_comando}", dependencies=[Depends(admin_auditado("comando.desactivar", "comando", "id_comando"))])
 def eliminar_comando(id_comando: int):
     """Baja lógica: un DELETE físico dejaría historial con comando NULL (= DETENER)."""
     try:
@@ -398,7 +400,7 @@ def eliminar_comando(id_comando: int):
 
 # DEMOS
 
-@router.post("/vehiculos/{id_vehiculo}/demos", status_code=201)
+@router.post("/vehiculos/{id_vehiculo}/demos", status_code=201, dependencies=[Depends(admin_auditado("demo.crear", "vehiculo", "id_vehiculo"))])
 def crear_demo(id_vehiculo: int, datos: DemoCrear):
     resultados = ejecutar_operacion(
         "sp_crear_demo",
@@ -410,7 +412,7 @@ def crear_demo(id_vehiculo: int, datos: DemoCrear):
     }
 
 
-@router.put("/demos/{id_demo}")
+@router.put("/demos/{id_demo}", dependencies=[Depends(admin_auditado("demo.actualizar", "demo", "id_demo"))])
 def actualizar_demo(id_demo: int, datos: DemoActualizar):
     resultados = ejecutar_operacion(
         "sp_actualizar_demo",
@@ -422,7 +424,7 @@ def actualizar_demo(id_demo: int, datos: DemoActualizar):
     }
 
 
-@router.delete("/demos/{id_demo}")
+@router.delete("/demos/{id_demo}", dependencies=[Depends(admin_auditado("demo.eliminar", "demo", "id_demo"))])
 def eliminar_demo(id_demo: int):
     resultados = ejecutar_operacion(
         "sp_eliminar_demo",
@@ -436,7 +438,7 @@ def eliminar_demo(id_demo: int):
 
 # MOVIMIENTOS DE DEMO
 
-@router.post("/demos/{id_demo}/movimientos", status_code=201)
+@router.post("/demos/{id_demo}/movimientos", status_code=201, dependencies=[Depends(admin_auditado("demo.paso_agregar", "demo", "id_demo"))])
 def agregar_movimiento_demo(id_demo: int, datos: MovimientoDemoCrear):
     resultados = ejecutar_operacion(
         "sp_agregar_movimiento_demo",
@@ -454,7 +456,7 @@ def agregar_movimiento_demo(id_demo: int, datos: MovimientoDemoCrear):
     }
 
 
-@router.put("/movimientos-demo/{id_demo_movimiento}")
+@router.put("/movimientos-demo/{id_demo_movimiento}", dependencies=[Depends(admin_auditado("demo.paso_actualizar", "demo_movimiento", "id_demo_movimiento"))])
 def actualizar_movimiento_demo(
     id_demo_movimiento: int,
     datos: MovimientoDemoActualizar,
@@ -475,7 +477,7 @@ def actualizar_movimiento_demo(
     }
 
 
-@router.delete("/movimientos-demo/{id_demo_movimiento}")
+@router.delete("/movimientos-demo/{id_demo_movimiento}", dependencies=[Depends(admin_auditado("demo.paso_eliminar", "demo_movimiento", "id_demo_movimiento"))])
 def eliminar_movimiento_demo(id_demo_movimiento: int):
     resultados = ejecutar_operacion(
         "sp_eliminar_movimiento_demo",
@@ -488,7 +490,7 @@ def eliminar_movimiento_demo(id_demo_movimiento: int):
 
 # ESTADO DEL VEHÍCULO
 
-@router.put("/vehiculos/{id_vehiculo}/estado")
+@router.put("/vehiculos/{id_vehiculo}/estado", dependencies=[Depends(admin_auditado("estado.forzar", "vehiculo", "id_vehiculo"))])
 async def actualizar_estado(
     id_vehiculo: int,
     datos: EstadoActualizar,
@@ -531,7 +533,7 @@ async def actualizar_estado(
     }
 
 
-@router.post("/vehiculos/{id_vehiculo}/comandos/{id_comando}/ejecutar")
+@router.post("/vehiculos/{id_vehiculo}/comandos/{id_comando}/ejecutar", dependencies=[Depends(acceso_vehiculo(Accion.OPERAR))])
 async def ejecutar_comando_individual(id_vehiculo: int, id_comando: int):
     comando = await asyncio.to_thread(
         validar_comando_individual,
@@ -629,7 +631,7 @@ async def ejecutar_comando_individual(id_vehiculo: int, id_comando: int):
 ESPERA_REGISTRO_PREVIO_S = 5.0
 
 
-@router.post("/vehiculos/{id_vehiculo}/detener")
+@router.post("/vehiculos/{id_vehiculo}/detener", dependencies=[Depends(acceso_vehiculo(Accion.OPERAR))])
 async def detener_vehiculo(id_vehiculo: int):
     """DETENER tiene prioridad: cancela la demo en curso y no espera a otro comando.
 
@@ -727,7 +729,7 @@ async def _enviar_detener(id_vehiculo: int, demo_cancelada: bool) -> dict[str, A
 
 # HISTORIAL DE COMANDOS
 
-@router.post("/vehiculos/{id_vehiculo}/historial", status_code=201)
+@router.post("/vehiculos/{id_vehiculo}/historial", status_code=201, dependencies=[Depends(admin_auditado("historial.registrar_manual", "vehiculo", "id_vehiculo"))])
 def registrar_historial(
     id_vehiculo: int,
     datos: HistorialRegistrar,

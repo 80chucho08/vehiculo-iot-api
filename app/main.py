@@ -1,5 +1,8 @@
 import logging
 
+from app.api.routes.admin import router as admin_router
+from app.api.routes.auth import router as auth_router
+from app.api.routes.mis_vehiculos import router as mis_vehiculos_router
 from app.api.routes.vehiculos import router as vehiculos_router
 from app.api.routes.consultas import router as consultas_router
 from app.api.routes.operaciones import router as operaciones_router
@@ -23,8 +26,12 @@ logger = logging.getLogger(__name__)
 
 app = FastAPI(
     title=settings.app_name,
-    description="API local para administrar vehículos IoT.",
-    version="1.0.0",
+    description=(
+        "API de CONTROL, MONITOREO y ADMINISTRACIÓN de vehículos IoT. "
+        "Usa **Authorize** con el token de `POST /api/auth/login`. "
+        "CORS no sustituye la autorización: cada ruta comprueba rol y propiedad de la unidad."
+    ),
+    version="1.1.0",
 )
 
 ORIGENES_PERMITIDOS = [
@@ -36,11 +43,16 @@ ORIGENES_PERMITIDOS = [
 app.add_middleware(
     CORSMiddleware,
     allow_origins=ORIGENES_PERMITIDOS,
-    allow_methods=["GET", "POST", "PUT"],
-    allow_headers=["Accept", "Content-Type"],
+    allow_methods=["GET", "POST", "PUT", "DELETE"],
+    # Authorization: token Bearer. Sin cookies (allow_credentials=False): el token viaja en la cabecera.
+    allow_headers=["Accept", "Content-Type", "Authorization"],
+    expose_headers=["Retry-After"],
     allow_credentials=False,
 )
 
+app.include_router(auth_router)
+app.include_router(admin_router)
+app.include_router(mis_vehiculos_router)
 app.include_router(vehiculos_router)
 app.include_router(consultas_router)
 app.include_router(operaciones_router)

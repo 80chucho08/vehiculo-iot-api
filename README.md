@@ -382,6 +382,10 @@ sp_eliminar_movimiento_demo
 
 `sp_eliminar_vehiculo` y `sp_eliminar_comando` siguen existiendo en RDS, pero **se retiraron de la lista blanca**: hacen `DELETE` físico, y las llaves foráneas borrarían en cascada el historial del vehículo o pondrían en NULL (= DETENER) el comando de filas del historial. Las bajas se hacen con `UPDATE ... SET activo = 0` parametrizado en `app/db/bajas_logicas.py`. El esquema real de referencia está en `docs/esquema_base_2026-11-18.sql`.
 
+### Autenticación y roles (4.3)
+
+Inicio de sesión con token corto revocable, roles `admin`/`usuario` y autorización por unidad (propiedad + consentimiento de soporte) en todas las rutas. Contrato, matriz de permisos, pruebas y pasos de despliegue en [`docs/autenticacion.md`](docs/autenticacion.md).
+
 ### Migraciones (4.3)
 
 El esquema se amplía con migraciones versionadas UP/DOWN en [`migrations/`](migrations/README.md): usuarios y sesiones, modelos y unidades, asignaciones, demos privadas, sesiones de invitado, auditoría, autoría del historial y FK en RESTRICT. Se aplican con `scripts/migrar.py`, después de un respaldo verificable con `scripts/respaldo_bd.py`. La guía tiene el diagrama ER, el checklist y el plan de reversión.

@@ -274,7 +274,10 @@ class AsyncCommandFlowTests(unittest.IsolatedAsyncioTestCase):
             await dispositivo.accepted.wait()
             while websocket_manager.connected_clients(1, "dispositivo") == 0:
                 await asyncio.sleep(0)
-            with patch.object(operaciones, "ejecutar_operacion", return_value=[[]]):
+            # La ruta autoriza contra la base: unidad 1 sin comprador (exhibición, transición).
+            unidad = {"id_vehiculo": 1, "tipo_unidad": "exhibicion", "activo": 1, "id_propietario": None}
+            with patch.object(operaciones, "ejecutar_operacion", return_value=[[]]), \
+                 patch("app.api.deps.propiedad.unidad", return_value=unidad):
                 await app(scope, receive, send)
             await dispositivo.incoming.put(None)
             await websocket_task

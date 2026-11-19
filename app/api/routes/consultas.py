@@ -1,11 +1,13 @@
 from typing import Any
 
 import pymysql
-from fastapi import APIRouter, HTTPException
+from fastapi import APIRouter, Depends, HTTPException
 
+from app.api.deps import acceso_demo, acceso_vehiculo
 from app.core.websocket_manager import websocket_manager
 from app.db.connection import get_connection
 from app.db.procedure_executor import execute_procedure
+from app.services.autorizacion import Accion
 
 router = APIRouter(
     prefix="/api",
@@ -41,7 +43,7 @@ def consultar_procedimiento(
             connection.close()
 
 
-@router.get("/vehiculos/{id_vehiculo}")
+@router.get("/vehiculos/{id_vehiculo}", dependencies=[Depends(acceso_vehiculo(Accion.VER))])
 def obtener_vehiculo(id_vehiculo: int):
     resultados = consultar_procedimiento(
         "sp_obtener_vehiculo",
@@ -57,7 +59,7 @@ def obtener_vehiculo(id_vehiculo: int):
     return resultados[0]
 
 
-@router.get("/vehiculos/{id_vehiculo}/comandos")
+@router.get("/vehiculos/{id_vehiculo}/comandos", dependencies=[Depends(acceso_vehiculo(Accion.VER))])
 def obtener_comandos(id_vehiculo: int):
     resultados = consultar_procedimiento(
         "sp_obtener_comandos_vehiculo",
@@ -70,7 +72,7 @@ def obtener_comandos(id_vehiculo: int):
     }
 
 
-@router.get("/vehiculos/{id_vehiculo}/estado")
+@router.get("/vehiculos/{id_vehiculo}/estado", dependencies=[Depends(acceso_vehiculo(Accion.MONITOREAR))])
 def obtener_estado(id_vehiculo: int):
     resultados = consultar_procedimiento(
         "sp_obtener_estado",
@@ -86,7 +88,7 @@ def obtener_estado(id_vehiculo: int):
     }
 
 
-@router.get("/vehiculos/{id_vehiculo}/historial")
+@router.get("/vehiculos/{id_vehiculo}/historial", dependencies=[Depends(acceso_vehiculo(Accion.MONITOREAR))])
 def obtener_historial(id_vehiculo: int):
     resultados = consultar_procedimiento(
         "sp_obtener_historial",
@@ -99,7 +101,7 @@ def obtener_historial(id_vehiculo: int):
     }
 
 
-@router.get("/vehiculos/{id_vehiculo}/demos")
+@router.get("/vehiculos/{id_vehiculo}/demos", dependencies=[Depends(acceso_vehiculo(Accion.VER))])
 def obtener_demos(id_vehiculo: int):
     resultados = consultar_procedimiento(
         "sp_obtener_demos",
@@ -112,7 +114,7 @@ def obtener_demos(id_vehiculo: int):
     }
 
 
-@router.get("/demos/{id_demo}/movimientos")
+@router.get("/demos/{id_demo}/movimientos", dependencies=[Depends(acceso_demo(Accion.VER))])
 def obtener_movimientos_demo(id_demo: int):
     resultados = consultar_procedimiento(
         "sp_obtener_movimientos_demo",

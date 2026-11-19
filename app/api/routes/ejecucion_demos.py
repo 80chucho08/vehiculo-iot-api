@@ -1,6 +1,8 @@
 
-from fastapi import APIRouter, HTTPException, status
+from fastapi import APIRouter, Depends, HTTPException, status
 
+from app.api.deps import acceso_vehiculo
+from app.services.autorizacion import Accion
 from app.services.demo_executor import demo_execution_manager
 
 
@@ -13,6 +15,7 @@ router = APIRouter(
 @router.post(
     "/{id_vehiculo}/demos/{id_demo}/ejecutar",
     status_code=status.HTTP_202_ACCEPTED,
+    dependencies=[Depends(acceso_vehiculo(Accion.OPERAR))],
 )
 async def ejecutar_demo(id_vehiculo: int, id_demo: int):
     try:
@@ -47,7 +50,7 @@ async def ejecutar_demo(id_vehiculo: int, id_demo: int):
         )
 
 
-@router.post("/{id_vehiculo}/demos/cancelar")
+@router.post("/{id_vehiculo}/demos/cancelar", dependencies=[Depends(acceso_vehiculo(Accion.OPERAR))])
 async def cancelar_demo(id_vehiculo: int):
     try:
         await demo_execution_manager.cancelar(id_vehiculo)

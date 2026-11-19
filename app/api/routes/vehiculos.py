@@ -1,7 +1,8 @@
-from fastapi import APIRouter, HTTPException
+from fastapi import APIRouter, Depends, HTTPException
 import pymysql
 
 from app.db.connection import get_connection
+from app.api.deps import requiere_admin
 from app.db.procedure_executor import execute_procedure
 
 router = APIRouter(
@@ -10,7 +11,7 @@ router = APIRouter(
 )
 
 
-@router.get("")
+@router.get("", dependencies=[Depends(requiere_admin)])
 def obtener_vehiculos():
     connection = None
 
