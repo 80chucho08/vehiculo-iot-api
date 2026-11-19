@@ -26,6 +26,17 @@ def cargar_datos_demo(
     connection = get_connection()
 
     try:
+        resultados_vehiculo = execute_procedure(
+            connection,
+            "sp_obtener_vehiculo",
+            (id_vehiculo,),
+        )
+        filas_vehiculo = resultados_vehiculo[0] if resultados_vehiculo else []
+        if not filas_vehiculo:
+            raise LookupError("Vehículo no encontrado.")
+        if not bool(filas_vehiculo[0].get("activo", 0)):
+            raise ValueError("El vehículo está dado de baja.")
+
         resultados_demos = execute_procedure(
             connection,
             "sp_obtener_demos",
@@ -69,6 +80,32 @@ def cargar_datos_demo(
             key=lambda movimiento: int(movimiento["orden"]),
         )
 
+        # Cada paso debe usar un comando activo de la misma unidad y un
+        # código de movimiento 1-12 (el 13 es la demo local del firmware).
+        resultados_comandos = execute_procedure(
+            connection,
+            "sp_obtener_comandos_vehiculo",
+            (id_vehiculo,),
+        )
+        comandos = {
+            int(fila["id_comando"]): fila
+            for fila in (resultados_comandos[0] if resultados_comandos else [])
+        }
+        for movimiento in movimientos:
+            comando = comandos.get(int(movimiento["id_comando"]))
+            if comando is None:
+                raise ValueError(
+                    f"El paso {movimiento['orden']} usa un comando de otra unidad."
+                )
+            if not bool(comando.get("activo", 0)):
+                raise ValueError(
+                    f"El paso {movimiento['orden']} usa un comando desactivado."
+                )
+            if not 1 <= int(comando["codigo"]) <= 12:
+                raise ValueError(
+                    f"El paso {movimiento['orden']} usa un código no admitido en demos."
+                )
+
         return demo, movimientos
 
     finally:
@@ -79,8 +116,21 @@ class DemoExecutionManager:
     def __init__(self):
         self.tasks: dict[int, asyncio.Task] = {}
         self.individual_commands: set[int] = set()
+        # Se marca al terminar un comando individual (incluida su escritura en
+        # RDS). DETENER lo espera antes de registrar su propia fila, para que
+        # el historial quede en el orden real: movimiento y luego DETENER.
+        self.individual_done: dict[int, asyncio.Event] = {}
+        # DETENER en curso por vehículo (contador: puede haber varios a la vez).
+        self.stopping: dict[int, int] = {}
         self.start_results: dict[int, asyncio.Future[bool]] = {}
         self.lock = asyncio.Lock()
+
+    def deteniendo(self, id_vehiculo: int) -> bool:
+        return self.stopping.get(id_vehiculo, 0) > 0
+
+    def demo_activa(self, id_vehiculo: int) -> bool:
+        tarea = self.tasks.get(id_vehiculo)
+        return tarea is not None and not tarea.done()
 
     async def iniciar(
         self,
@@ -111,6 +161,11 @@ class DemoExecutionManager:
             if id_vehiculo in self.individual_commands:
                 raise RuntimeError(
                     "Hay un comando individual en curso para este vehículo."
+                )
+
+            if self.deteniendo(id_vehiculo):
+                raise RuntimeError(
+                    "Se está ejecutando DETENER para este vehículo."
                 )
 
             start_result = None

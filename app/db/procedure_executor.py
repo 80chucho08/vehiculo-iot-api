@@ -13,11 +13,12 @@ ALLOWED_PROCEDURES = {
     "sp_obtener_vehiculos",
     "sp_obtener_vehiculo",
     "sp_actualizar_vehiculo",
-    "sp_eliminar_vehiculo",
+    # sp_eliminar_vehiculo y sp_eliminar_comando se retiraron de la lista:
+    # hacen DELETE físico con efectos en cascada sobre el historial.
+    # Las bajas se hacen en app/db/bajas_logicas.py (activo = 0).
     "sp_crear_comando",
     "sp_obtener_comandos_vehiculo",
     "sp_actualizar_comando",
-    "sp_eliminar_comando",
     "sp_actualizar_estado",
     "sp_obtener_estado",
     "sp_registrar_historial",

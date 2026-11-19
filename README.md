@@ -316,7 +316,7 @@ La API documenta todos sus esquemas interactivamente a través de **Swagger UI**
 | `GET` | `/api/vehiculos/{id}` | Obtiene el detalle de un vehículo específico. | `200 OK`, `404 Not Found` |
 | `POST` | `/api/vehiculos` | Da de alta un nuevo vehículo. | `201 Created` |
 | `PUT` | `/api/vehiculos/{id}` | Actualiza datos y el estado `activo` del vehículo. | `200 OK` |
-| `DELETE`| `/api/vehiculos/{id}` | Elimina el vehículo indicado. | `200 OK` |
+| `DELETE`| `/api/vehiculos/{id}` | **Baja lógica**: marca `activo = 0` y conserva comandos, demos e historial. Ya no borra filas. | `200 OK`, `404 Not Found` |
 
 ### 3. Comandos de Vehículos
 
@@ -325,14 +325,14 @@ La API documenta todos sus esquemas interactivamente a través de **Swagger UI**
 | `GET` | `/api/vehiculos/{id}/comandos` | Lista los comandos asociados al vehículo. | `200 OK` |
 | `POST` | `/api/vehiculos/{id}/comandos` | Crea un nuevo comando asignado al vehículo. | `201 Created` |
 | `PUT` | `/api/comandos/{id_comando}` | Actualiza nombre, código o estado de un comando. | `200 OK` |
-| `DELETE`| `/api/comandos/{id_comando}` | Elimina el comando especificado. | `200 OK` |
+| `DELETE`| `/api/comandos/{id_comando}` | **Desactiva** el comando (`activo = 0`). Un borrado físico dejaría filas del historial con comando NULL, que significa DETENER. | `200 OK`, `404 Not Found` |
 
 ### 4. Control y Despacho en Vivo
 
 | Método | Ruta | Descripción | Respuestas |
 | :--- | :--- | :--- | :--- |
 | `POST` | `/api/vehiculos/{id}/comandos/{id_cmd}/ejecutar` | Envía el comando al vehículo y espera confirmación ACK del firmware. | `200 OK`, `404 Not Found`, `409 Conflict`, `504 Timeout` |
-| `POST` | `/api/vehiculos/{id}/detener` | Envía el código de emergencia `0` para apagar todas las salidas. | `200 OK`, `409 Conflict`, `504 Timeout` |
+| `POST` | `/api/vehiculos/{id}/detener` | Envía el código de emergencia `0` para apagar todas las salidas. **Tiene prioridad**: si hay una demo en curso la cancela (la respuesta trae `demo_cancelada: true`), y si hay un comando individual pendiente no lo espera para enviar la orden física, solo para registrar su fila después. Mientras se ejecuta, los comandos individuales y las demos nuevas reciben 409. | `200 OK`, `409 Conflict` (sin clientes WebSocket o rechazo del firmware), `504 Timeout` |
 
 ### 5. Demos y Movimientos Automatizados
 
@@ -346,7 +346,7 @@ La API documenta todos sus esquemas interactivamente a través de **Swagger UI**
 | `POST` | `/api/demos/{id_demo}/movimientos` | Agrega un movimiento a la demo (`id_comando`, `orden`, `duracion_ms`, `pausa_ms`). | `201 Created` |
 | `PUT` | `/api/movimientos-demo/{id_mov}` | Modifica los parámetros de un movimiento. | `200 OK` |
 | `DELETE`| `/api/movimientos-demo/{id_mov}` | Elimina un movimiento de la demo. | `200 OK` |
-| `POST` | `/api/vehiculos/{id}/demos/{id_demo}/ejecutar` | Inicia la secuencia automatizada en segundo plano. | `202 Accepted`, `404 Not Found`, `409 Conflict` |
+| `POST` | `/api/vehiculos/{id}/demos/{id_demo}/ejecutar` | Inicia la secuencia automatizada en segundo plano. Responde 409 si el vehículo está dado de baja o si algún paso usa un comando desactivado, de otra unidad o con código fuera de 1–12. | `202 Accepted`, `404 Not Found`, `409 Conflict` |
 | `POST` | `/api/vehiculos/{id}/demos/cancelar` | Detiene y cancela la demo en curso inmediatamente. | `200 OK`, `409 Conflict` |
 
 ### 6. Telemetría e Historial
@@ -372,14 +372,15 @@ sp_crear_vehiculo             sp_actualizar_estado
 sp_obtener_vehiculos          sp_obtener_estado
 sp_obtener_vehiculo           sp_registrar_historial
 sp_actualizar_vehiculo        sp_obtener_historial
-sp_eliminar_vehiculo          sp_crear_demo
-sp_crear_comando              sp_obtener_demos
-sp_obtener_comandos_vehiculo  sp_actualizar_demo
-sp_actualizar_comando         sp_eliminar_demo
-sp_eliminar_comando           sp_agregar_movimiento_demo
-sp_obtener_movimientos_demo   sp_actualizar_movimiento_demo
+sp_crear_comando              sp_crear_demo
+sp_obtener_comandos_vehiculo  sp_obtener_demos
+sp_actualizar_comando         sp_actualizar_demo
+sp_obtener_movimientos_demo   sp_eliminar_demo
+sp_agregar_movimiento_demo    sp_actualizar_movimiento_demo
 sp_eliminar_movimiento_demo
 ```
+
+`sp_eliminar_vehiculo` y `sp_eliminar_comando` siguen existiendo en RDS, pero **se retiraron de la lista blanca**: hacen `DELETE` físico, y las llaves foráneas borrarían en cascada el historial del vehículo o pondrían en NULL (= DETENER) el comando de filas del historial. Las bajas se hacen con `UPDATE ... SET activo = 0` parametrizado en `app/db/bajas_logicas.py`. El esquema real de referencia está en `docs/esquema_base_2026-11-18.sql`.
 
 ### Gestión Transaccional
 Las operaciones de escritura en `app/db/operation_executor.py` ejecutan los procedimientos dentro de una transacción explícita:
@@ -457,7 +458,7 @@ uvicorn app.main:app --reload --host 0.0.0.0 --port 8000
 
 ## 🧪 Ejecución de Pruebas
 
-El proyecto cuenta con una suite completa de pruebas unitarias y asíncronas (`tests/test_command_flow.py`) que validan el flujo de comandos, timeouts, validaciones de entidad y concurrencia sin requerir una base de datos activa (utilizando mocks):
+El proyecto cuenta con una suite completa de pruebas unitarias y asíncronas (`tests/test_command_flow.py` y `tests/test_detener_y_bajas.py`, 37 en total) que validan el flujo de comandos, timeouts, validaciones de entidad y concurrencia sin requerir una base de datos activa (utilizando mocks):
 
 ```bash
 # Ejecutar todas las pruebas con unittest

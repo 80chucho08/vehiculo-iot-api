@@ -9,6 +9,7 @@ from fastapi import APIRouter, HTTPException
 from pydantic import BaseModel, Field
 
 from app.core.websocket_manager import websocket_manager
+from app.db.bajas_logicas import desactivar_comando, desactivar_vehiculo
 from app.db.connection import get_connection
 from app.db.operation_executor import ejecutar_operacion
 from app.db.procedure_executor import execute_procedure
@@ -296,14 +297,27 @@ def actualizar_vehiculo(
 
 @router.delete("/vehiculos/{id_vehiculo}")
 def eliminar_vehiculo(id_vehiculo: int):
-    resultados = ejecutar_operacion(
-        "sp_eliminar_vehiculo",
-        (id_vehiculo,),
-    )
+    """Baja lógica: marca activo = 0 y conserva comandos, demos e historial."""
+    try:
+        activo_anterior = desactivar_vehiculo(id_vehiculo)
+    except pymysql.MySQLError:
+        raise HTTPException(
+            status_code=500,
+            detail="No fue posible dar de baja el vehículo.",
+        ) from None
+
+    if activo_anterior is None:
+        raise HTTPException(status_code=404, detail="Vehículo no encontrado.")
 
     return {
-        "mensaje": "Procedimiento de eliminación ejecutado correctamente.",
-        "resultados": primer_resultado(resultados),
+        "mensaje": (
+            "Vehículo dado de baja (activo = 0); su historial se conserva."
+            if activo_anterior
+            else "El vehículo ya estaba dado de baja."
+        ),
+        "id_vehiculo": id_vehiculo,
+        "activo": False,
+        "resultados": [],
     }
 
 
@@ -354,14 +368,27 @@ def actualizar_comando(
 
 @router.delete("/comandos/{id_comando}")
 def eliminar_comando(id_comando: int):
-    resultados = ejecutar_operacion(
-        "sp_eliminar_comando",
-        (id_comando,),
-    )
+    """Baja lógica: un DELETE físico dejaría historial con comando NULL (= DETENER)."""
+    try:
+        activo_anterior = desactivar_comando(id_comando)
+    except pymysql.MySQLError:
+        raise HTTPException(
+            status_code=500,
+            detail="No fue posible desactivar el comando.",
+        ) from None
+
+    if activo_anterior is None:
+        raise HTTPException(status_code=404, detail="Comando no encontrado.")
 
     return {
-        "mensaje": "Procedimiento de eliminación de comando ejecutado correctamente.",
-        "resultados": primer_resultado(resultados),
+        "mensaje": (
+            "Comando desactivado (activo = 0); el historial se conserva."
+            if activo_anterior
+            else "El comando ya estaba desactivado."
+        ),
+        "id_comando": id_comando,
+        "activo": False,
+        "resultados": [],
     }
 
 
@@ -520,7 +547,14 @@ async def ejecutar_comando_individual(id_vehiculo: int, id_comando: int):
                 status_code=409,
                 detail="Ya hay un comando individual pendiente para este vehículo.",
             )
+        if demo_execution_manager.deteniendo(id_vehiculo):
+            raise HTTPException(
+                status_code=409,
+                detail="Se está ejecutando DETENER para este vehículo.",
+            )
         demo_execution_manager.individual_commands.add(id_vehiculo)
+        terminado = asyncio.Event()
+        demo_execution_manager.individual_done[id_vehiculo] = terminado
 
     id_solicitud = str(uuid.uuid4())
     mensaje = {
@@ -578,26 +612,66 @@ async def ejecutar_comando_individual(id_vehiculo: int, id_comando: int):
             "resultados": primer_resultado(resultados),
         }
     finally:
+        terminado.set()
         async with demo_execution_manager.lock:
             demo_execution_manager.individual_commands.discard(id_vehiculo)
+            if demo_execution_manager.individual_done.get(id_vehiculo) is terminado:
+                demo_execution_manager.individual_done.pop(id_vehiculo, None)
+
+
+# Tiempo máximo que DETENER espera a que un comando individual en vuelo
+# registre su fila, para que la fila de DETENER quede después en el historial.
+# La orden física de apagado NO espera: se envía antes.
+ESPERA_REGISTRO_PREVIO_S = 5.0
 
 
 @router.post("/vehiculos/{id_vehiculo}/detener")
 async def detener_vehiculo(id_vehiculo: int):
-    async with demo_execution_manager.lock:
-        tarea = demo_execution_manager.tasks.get(id_vehiculo)
-        if tarea is not None and not tarea.done():
-            raise HTTPException(
-                status_code=409,
-                detail="Cancela la demo antes de detener manualmente el vehículo.",
-            )
-        if id_vehiculo in demo_execution_manager.individual_commands:
-            raise HTTPException(
-                status_code=409,
-                detail="Hay un comando individual pendiente para este vehículo.",
-            )
-        demo_execution_manager.individual_commands.add(id_vehiculo)
+    """DETENER tiene prioridad: cancela la demo en curso y no espera a otro comando.
 
+    Nunca responde 409 por una demo o por un comando individual pendiente.
+    Solo responde 409 si no hay ningún cliente WebSocket que reciba la orden
+    o si el firmware la rechaza, y 504 si el firmware no confirma.
+    """
+    manager = demo_execution_manager
+    async with manager.lock:
+        manager.stopping[id_vehiculo] = manager.stopping.get(id_vehiculo, 0) + 1
+        hay_demo = manager.demo_activa(id_vehiculo)
+
+    try:
+        demo_cancelada = False
+        if hay_demo:
+            # cancelar() envía APAGAR_TODO al dispositivo y demo_cancelada a todos.
+            try:
+                await manager.cancelar(id_vehiculo)
+                demo_cancelada = True
+            except RuntimeError:
+                # La demo terminó entre la comprobación y la cancelación.
+                pass
+        return await _enviar_detener(id_vehiculo, demo_cancelada)
+    finally:
+        async with manager.lock:
+            restantes = manager.stopping.get(id_vehiculo, 1) - 1
+            if restantes > 0:
+                manager.stopping[id_vehiculo] = restantes
+            else:
+                manager.stopping.pop(id_vehiculo, None)
+
+
+async def _esperar_registro_previo(id_vehiculo: int) -> None:
+    terminado = demo_execution_manager.individual_done.get(id_vehiculo)
+    if terminado is None:
+        return
+    try:
+        await asyncio.wait_for(terminado.wait(), timeout=ESPERA_REGISTRO_PREVIO_S)
+    except asyncio.TimeoutError:
+        logger.warning(
+            "DETENER registra sin esperar al comando previo id_vehiculo=%s",
+            id_vehiculo,
+        )
+
+
+async def _enviar_detener(id_vehiculo: int, demo_cancelada: bool) -> dict[str, Any]:
     id_solicitud = str(uuid.uuid4())
     mensaje = {
         "tipo": "comando_individual",
@@ -607,43 +681,44 @@ async def detener_vehiculo(id_vehiculo: int):
         "comando": "APAGAR_TODO",
         "codigo": 0,
     }
-    try:
-        ack = await enviar_comando_y_esperar_ack(id_vehiculo, mensaje)
-        alterno = isinstance(ack, int)
-        if not alterno and ack.get("estado") != "procesado":
-            raise HTTPException(
-                status_code=409,
-                detail=ack.get("detalle", "El firmware rechazó la orden de apagado."),
-            )
-        resultados = await asyncio.to_thread(
-            ejecutar_operacion,
-            "sp_actualizar_estado",
-            (id_vehiculo, None, 1),
-            (("sp_registrar_historial", (id_vehiculo, None, "interfaz_web")),),
+    # La orden física sale de inmediato, aunque haya un comando individual en vuelo.
+    ack = await enviar_comando_y_esperar_ack(id_vehiculo, mensaje)
+    alterno = isinstance(ack, int)
+    if not alterno and ack.get("estado") != "procesado":
+        raise HTTPException(
+            status_code=409,
+            detail=ack.get("detalle", "El firmware rechazó la orden de apagado."),
         )
-        if alterno:
-            await websocket_manager.send_to_vehicle(
-                id_vehiculo,
-                {
-                    "tipo": "comando_individual_completado",
-                    "id_vehiculo": id_vehiculo,
-                    "id_solicitud": id_solicitud,
-                    "id_comando": None,
-                    "comando": "APAGAR_TODO",
-                    "estado": "entregado_a_observadores",
-                    "mensaje": "El comando se entregó a observadores; sin confirmación de firmware.",
-                },
-                role="observador",
-            )
-        return {
-            "mensaje": f"No hay dispositivo conectado; el comando se entregó a {ack} cliente(s) WebSocket." if alterno else "El firmware aceptó la orden de apagar todas las salidas.",
-            "id_solicitud": id_solicitud,
-            "estado": "entregado_a_observadores" if alterno else "procesado_por_firmware",
-            "resultados": [] if alterno else primer_resultado(resultados),
-        }
-    finally:
-        async with demo_execution_manager.lock:
-            demo_execution_manager.individual_commands.discard(id_vehiculo)
+    # Solo el REGISTRO espera al comando previo, para conservar el orden real
+    # en historial_comandos y que estado_vehiculo termine en DETENER.
+    await _esperar_registro_previo(id_vehiculo)
+    resultados = await asyncio.to_thread(
+        ejecutar_operacion,
+        "sp_actualizar_estado",
+        (id_vehiculo, None, 1),
+        (("sp_registrar_historial", (id_vehiculo, None, "interfaz_web")),),
+    )
+    if alterno:
+        await websocket_manager.send_to_vehicle(
+            id_vehiculo,
+            {
+                "tipo": "comando_individual_completado",
+                "id_vehiculo": id_vehiculo,
+                "id_solicitud": id_solicitud,
+                "id_comando": None,
+                "comando": "APAGAR_TODO",
+                "estado": "entregado_a_observadores",
+                "mensaje": "El comando se entregó a observadores; sin confirmación de firmware.",
+            },
+            role="observador",
+        )
+    return {
+        "mensaje": f"No hay dispositivo conectado; el comando se entregó a {ack} cliente(s) WebSocket." if alterno else "El firmware aceptó la orden de apagar todas las salidas.",
+        "id_solicitud": id_solicitud,
+        "estado": "entregado_a_observadores" if alterno else "procesado_por_firmware",
+        "demo_cancelada": demo_cancelada,
+        "resultados": [] if alterno else primer_resultado(resultados),
+    }
 
 
 # HISTORIAL DE COMANDOS
