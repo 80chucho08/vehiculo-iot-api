@@ -26,3 +26,6 @@ Thumbs.db
 
 # Inventario local del esquema
 esquema_actual.sql
+
+# Respaldos logicos de la base (contienen datos)
+respaldos/

@@ -382,6 +382,12 @@ sp_eliminar_movimiento_demo
 
 `sp_eliminar_vehiculo` y `sp_eliminar_comando` siguen existiendo en RDS, pero **se retiraron de la lista blanca**: hacen `DELETE` físico, y las llaves foráneas borrarían en cascada el historial del vehículo o pondrían en NULL (= DETENER) el comando de filas del historial. Las bajas se hacen con `UPDATE ... SET activo = 0` parametrizado en `app/db/bajas_logicas.py`. El esquema real de referencia está en `docs/esquema_base_2026-11-18.sql`.
 
+### Migraciones (4.3)
+
+El esquema se amplía con migraciones versionadas UP/DOWN en [`migrations/`](migrations/README.md): usuarios y sesiones, modelos y unidades, asignaciones, demos privadas, sesiones de invitado, auditoría, autoría del historial y FK en RESTRICT. Se aplican con `scripts/migrar.py`, después de un respaldo verificable con `scripts/respaldo_bd.py`. La guía tiene el diagrama ER, el checklist y el plan de reversión.
+
+Cada conexión de la API abre la sesión con `sql_mode` estricto y `time_zone` UTC (`app/db/connection.py`). Así, un valor fuera de rango falla en vez de truncarse en silencio.
+
 ### Gestión Transaccional
 Las operaciones de escritura en `app/db/operation_executor.py` ejecutan los procedimientos dentro de una transacción explícita:
 - Si todos los procedimientos de la operación concluyen con éxito: se aplica `connection.commit()`.

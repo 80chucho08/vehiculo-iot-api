@@ -63,18 +63,22 @@ class DemoActualizar(BaseModel):
     activo: bool
 
 
+# Tope de seguridad física por paso y por pausa; coincide con los CHECK de la migración V004.
+MAX_PASO_DEMO_MS = 10_000
+
+
 class MovimientoDemoCrear(BaseModel):
     id_comando: int
     orden: int = Field(ge=1)
-    duracion_ms: int = Field(ge=0)
-    pausa_ms: int = Field(ge=0)
+    duracion_ms: int = Field(ge=0, le=MAX_PASO_DEMO_MS)
+    pausa_ms: int = Field(ge=0, le=MAX_PASO_DEMO_MS)
 
 
 class MovimientoDemoActualizar(BaseModel):
     id_comando: int
     orden: int = Field(ge=1)
-    duracion_ms: int = Field(ge=0)
-    pausa_ms: int = Field(ge=0)
+    duracion_ms: int = Field(ge=0, le=MAX_PASO_DEMO_MS)
+    pausa_ms: int = Field(ge=0, le=MAX_PASO_DEMO_MS)
 
 class EstadoActualizar(BaseModel):
     id_comando: int | None = None
