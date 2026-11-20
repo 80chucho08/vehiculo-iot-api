@@ -20,11 +20,12 @@ from app.repositories.base import (
 
 
 def unidad(id_vehiculo: int) -> dict[str, Any] | None:
-    """Datos mínimos para autorizar: tipo, activo y dueño vigente (si lo hay)."""
+    """Datos mínimos para autorizar: tipo, activo, dueño vigente y reserva de invitado vigente."""
     return una(
         "SELECT v.id_vehiculo, v.nombre, v.numero_serie, v.tipo_unidad, v.activo, "
-        "       a.id_usuario AS id_propietario "
+        "       a.id_usuario AS id_propietario, s.sid AS reserva_sid, s.expira_en AS reserva_expira "
         "  FROM vehiculos v LEFT JOIN asignaciones a ON a.vehiculo_activo = v.id_vehiculo "
+        "  LEFT JOIN sesiones_invitado s ON s.vehiculo_reservado = v.id_vehiculo AND s.expira_en > UTC_TIMESTAMP() "
         " WHERE v.id_vehiculo = %s",
         (id_vehiculo,),
     )

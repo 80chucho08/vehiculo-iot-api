@@ -17,6 +17,7 @@ from fastapi.security import HTTPAuthorizationCredentials, HTTPBearer
 from app.core import seguridad
 from app.repositories import auditoria, propiedad
 from app.repositories.base import una
+from app.repositories.demos import visible_para
 from app.services import auth
 from app.services.autorizacion import ANONIMO, Accion, Actor, evaluar
 
@@ -156,12 +157,38 @@ def acceso_demo(accion: Accion) -> Callable[..., Actor]:
 
     def dependencia(id_demo: int, request: Request, actor: Actor = Depends(actor_actual)) -> Actor:
         try:
-            fila = una("SELECT id_vehiculo FROM demos WHERE id_demo = %s", (id_demo,))
+            fila = una("SELECT id_vehiculo, tipo, id_propietario FROM demos WHERE id_demo = %s", (id_demo,))
         except pymysql.MySQLError:
             raise HTTPException(status.HTTP_503_SERVICE_UNAVAILABLE, "No fue posible verificar permisos.") from None
         if fila is None:
             raise HTTPException(status.HTTP_404_NOT_FOUND, "Demo no encontrada.")
         autorizar_unidad(request, actor, int(fila["id_vehiculo"]), accion)
+        # Una demo privada solo existe para su dueño (ni el admin ni otro usuario la ven).
+        if not visible_para(fila, actor.id_usuario):
+            raise HTTPException(status.HTTP_404_NOT_FOUND, "Demo no encontrada.")
         return actor
 
     return dependencia
+
+
+def comando_permitido_al_actor(id_vehiculo: int, id_comando: int, actor: Actor = Depends(actor_actual)) -> None:
+    """Un invitado solo puede ejecutar los comandos marcados como permitido_invitado (Inventario)."""
+    if actor.rol != "invitado":
+        return
+    try:
+        fila = una("SELECT permitido_invitado FROM comandos WHERE id_comando = %s AND id_vehiculo = %s",
+                   (id_comando, id_vehiculo))
+    except pymysql.MySQLError:
+        raise HTTPException(status.HTTP_503_SERVICE_UNAVAILABLE, "No fue posible verificar el comando.") from None
+    if fila is None or not fila["permitido_invitado"]:
+        raise HTTPException(status.HTTP_403_FORBIDDEN, "Ese comando no está disponible en la prueba de invitado.")
+
+
+def demo_ejecutable(id_demo: int, actor: Actor = Depends(actor_actual)) -> None:
+    """Para ejecutar: además de poder OPERAR la unidad, una demo privada solo la ejecuta su dueño."""
+    try:
+        fila = una("SELECT tipo, id_propietario FROM demos WHERE id_demo = %s", (id_demo,))
+    except pymysql.MySQLError:
+        raise HTTPException(status.HTTP_503_SERVICE_UNAVAILABLE, "No fue posible verificar la demo.") from None
+    if fila is not None and not visible_para(fila, actor.id_usuario):
+        raise HTTPException(status.HTTP_404_NOT_FOUND, "La demo no existe o no pertenece al vehículo indicado.")

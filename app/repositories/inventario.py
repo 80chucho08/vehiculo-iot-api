@@ -154,6 +154,23 @@ def actualizar_unidad(id_vehiculo: int, datos: dict[str, Any]) -> dict[str, Any]
         raise _traducir(error, "Ya existe una unidad con ese número de serie.") from None
 
 
+def guardar_token_dispositivo(id_vehiculo: int, token_hash: str) -> bool:
+    """Guarda el hash del token del ESP8266. Devuelve True si reemplazó uno anterior (rotación)."""
+    with transaccion() as cur:
+        cur.execute("SELECT 1 FROM credenciales_dispositivo WHERE id_vehiculo = %s FOR UPDATE", (id_vehiculo,))
+        existia = cur.fetchone() is not None
+        if existia:
+            cur.execute(
+                "UPDATE credenciales_dispositivo SET token_hash = %s, rotado_en = UTC_TIMESTAMP(), revocado_en = NULL "
+                " WHERE id_vehiculo = %s",
+                (token_hash, id_vehiculo),
+            )
+        else:
+            cur.execute("INSERT INTO credenciales_dispositivo (id_vehiculo, token_hash) VALUES (%s, %s)",
+                        (id_vehiculo, token_hash))
+        return existia
+
+
 # ---------- Comandos permitidos ----------
 
 def actualizar_permisos_comando(id_comando: int, activo: bool, permitido_invitado: bool, duracion_max_ms: int | None) -> dict[str, Any]:

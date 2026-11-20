@@ -32,6 +32,17 @@ class Settings(BaseSettings):
     login_max_intentos: int = 5
     login_bloqueo_minutos: int = 15
 
+    # ===== Invitados (Etapa 7) =====
+    invitado_minutos: int = 5            # duración de la prueba temporal
+    invitado_reservas_por_ip: int = 3    # reservas permitidas por IP en la ventana
+    invitado_ventana_minutos: int = 15
+
+    # ===== WSS (Etapa 8) =====
+    # El ESP8266 debe presentar ?token= (generado en ADMINISTRACIÓN → Inventario → Token ESP).
+    # Con False, una unidad SIN token registrado todavía puede conectar (firmware sin actualizar);
+    # una unidad CON token registrado siempre exige el correcto.
+    dispositivo_token_obligatorio: bool = False
+
     model_config = SettingsConfigDict(
         env_file=BASE_DIR / ".env",
         env_file_encoding="utf-8",

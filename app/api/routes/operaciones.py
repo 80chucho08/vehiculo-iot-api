@@ -8,7 +8,7 @@ import pymysql
 from fastapi import APIRouter, Depends, HTTPException
 from pydantic import BaseModel, Field
 
-from app.api.deps import acceso_vehiculo, admin_auditado
+from app.api.deps import acceso_vehiculo, admin_auditado, comando_permitido_al_actor
 from app.core.websocket_manager import websocket_manager
 from app.db.bajas_logicas import desactivar_comando, desactivar_vehiculo
 from app.db.connection import get_connection
@@ -533,7 +533,10 @@ async def actualizar_estado(
     }
 
 
-@router.post("/vehiculos/{id_vehiculo}/comandos/{id_comando}/ejecutar", dependencies=[Depends(acceso_vehiculo(Accion.OPERAR))])
+@router.post(
+    "/vehiculos/{id_vehiculo}/comandos/{id_comando}/ejecutar",
+    dependencies=[Depends(acceso_vehiculo(Accion.OPERAR)), Depends(comando_permitido_al_actor)],
+)
 async def ejecutar_comando_individual(id_vehiculo: int, id_comando: int):
     comando = await asyncio.to_thread(
         validar_comando_individual,
@@ -631,8 +634,25 @@ async def ejecutar_comando_individual(id_vehiculo: int, id_comando: int):
 ESPERA_REGISTRO_PREVIO_S = 5.0
 
 
-@router.post("/vehiculos/{id_vehiculo}/detener", dependencies=[Depends(acceso_vehiculo(Accion.OPERAR))])
+@router.post("/vehiculos/{id_vehiculo}/detener", dependencies=[Depends(acceso_vehiculo(Accion.DETENER))])
 async def detener_vehiculo(id_vehiculo: int):
+    """DETENER pedido desde la interfaz (ver `detener`)."""
+    return await detener(id_vehiculo, "interfaz_web")
+
+
+async def detener_por_sistema(id_vehiculo: int, motivo: str) -> None:
+    """DETENER que dispara el servidor (fin de una reserva de invitado). Si no hay nadie conectado
+    a la unidad no hay nada que detener: el firmware ya apaga todo al perder el WSS."""
+    try:
+        await detener(id_vehiculo, "sistema")
+        logger.info("DETENER automático id_vehiculo=%s motivo=%s", id_vehiculo, motivo)
+    except HTTPException as error:
+        logger.info("DETENER automático sin efecto id_vehiculo=%s motivo=%s detalle=%s", id_vehiculo, motivo, error.detail)
+    except Exception:
+        logger.exception("Falló el DETENER automático id_vehiculo=%s motivo=%s", id_vehiculo, motivo)
+
+
+async def detener(id_vehiculo: int, origen: str):
     """DETENER tiene prioridad: cancela la demo en curso y no espera a otro comando.
 
     Nunca responde 409 por una demo o por un comando individual pendiente.
@@ -654,7 +674,7 @@ async def detener_vehiculo(id_vehiculo: int):
             except RuntimeError:
                 # La demo terminó entre la comprobación y la cancelación.
                 pass
-        return await _enviar_detener(id_vehiculo, demo_cancelada)
+        return await _enviar_detener(id_vehiculo, demo_cancelada, origen)
     finally:
         async with manager.lock:
             restantes = manager.stopping.get(id_vehiculo, 1) - 1
@@ -677,7 +697,7 @@ async def _esperar_registro_previo(id_vehiculo: int) -> None:
         )
 
 
-async def _enviar_detener(id_vehiculo: int, demo_cancelada: bool) -> dict[str, Any]:
+async def _enviar_detener(id_vehiculo: int, demo_cancelada: bool, origen: str = "interfaz_web") -> dict[str, Any]:
     id_solicitud = str(uuid.uuid4())
     mensaje = {
         "tipo": "comando_individual",
@@ -702,7 +722,7 @@ async def _enviar_detener(id_vehiculo: int, demo_cancelada: bool) -> dict[str, A
         ejecutar_operacion,
         "sp_actualizar_estado",
         (id_vehiculo, None, 1),
-        (("sp_registrar_historial", (id_vehiculo, None, "interfaz_web")),),
+        (("sp_registrar_historial", (id_vehiculo, None, origen)),),
     )
     if alterno:
         await websocket_manager.send_to_vehicle(

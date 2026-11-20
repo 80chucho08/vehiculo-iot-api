@@ -1,7 +1,13 @@
+import asyncio
 import logging
+from contextlib import asynccontextmanager, suppress
 
 from app.api.routes.admin import router as admin_router
 from app.api.routes.auth import router as auth_router
+from app.api.routes.invitado import router as invitado_router
+from app.api.routes.wss import router as wss_router
+from app.services.acceso_wss import revalidar_conexiones
+from app.services.vigilante import vigilar
 from app.api.routes.mis_vehiculos import router as mis_vehiculos_router
 from app.api.routes.vehiculos import router as vehiculos_router
 from app.api.routes.consultas import router as consultas_router
@@ -14,6 +20,7 @@ from app.api.routes.ejecucion_demos import (
 
 import pymysql
 from fastapi import FastAPI, HTTPException
+from fastapi.responses import JSONResponse
 
 from app.core.config import settings
 from app.db.connection import get_connection
@@ -24,14 +31,27 @@ from fastapi.middleware.cors import CORSMiddleware
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
+@asynccontextmanager
+async def ciclo_de_vida(_app: FastAPI):
+    """Arranca el vigilante (reservas vencidas y revalidación de WSS) y lo detiene al apagar."""
+    tarea = asyncio.create_task(vigilar(revalidar_conexiones))
+    try:
+        yield
+    finally:
+        tarea.cancel()
+        with suppress(asyncio.CancelledError):
+            await tarea
+
+
 app = FastAPI(
+    lifespan=ciclo_de_vida,
     title=settings.app_name,
     description=(
         "API de CONTROL, MONITOREO y ADMINISTRACIÓN de vehículos IoT. "
         "Usa **Authorize** con el token de `POST /api/auth/login`. "
         "CORS no sustituye la autorización: cada ruta comprueba rol y propiedad de la unidad."
     ),
-    version="1.1.0",
+    version="1.2.0",
 )
 
 ORIGENES_PERMITIDOS = [
@@ -50,7 +70,19 @@ app.add_middleware(
     allow_credentials=False,
 )
 
+
+
+@app.exception_handler(pymysql.MySQLError)
+async def error_base_datos(_request, error: pymysql.MySQLError):
+    """Cualquier error de MySQL no capturado → 503 en JSON. Al manejarse aquí (dentro de CORS),
+    el navegador recibe las cabeceras CORS y ve el error real en vez de "no se pudo conectar"."""
+    logger.error("Error de base de datos no controlado: %s", error)
+    return JSONResponse(status_code=503, content={"detail": "La base de datos no respondió correctamente. Intenta de nuevo."})
+
+
 app.include_router(auth_router)
+app.include_router(invitado_router)
+app.include_router(wss_router)
 app.include_router(admin_router)
 app.include_router(mis_vehiculos_router)
 app.include_router(vehiculos_router)

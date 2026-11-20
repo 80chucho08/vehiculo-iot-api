@@ -267,7 +267,8 @@ class AsyncCommandFlowTests(unittest.IsolatedAsyncioTestCase):
             "root_path": "",
         }
 
-        with patch.object(websocket_routes, "cargar_estado_inicial", return_value=([], [])):
+        with patch.object(websocket_routes, "cargar_estado_inicial", return_value=([], [])), \
+             patch.object(websocket_routes.acceso_wss, "dispositivo_autorizado", return_value=True):
             websocket_task = asyncio.create_task(
                 websocket_routes.websocket_vehiculo(dispositivo, 1)
             )

@@ -10,6 +10,8 @@ from app.core.websocket_manager import websocket_manager
 from app.db.connection import get_connection
 from app.db.operation_executor import ejecutar_operacion
 from app.db.procedure_executor import execute_procedure
+from app.repositories.demos import LIMITES_POR_OMISION
+from app.services.validacion_demos import errores_pasos
 
 
 logger = logging.getLogger(__name__)
@@ -105,6 +107,27 @@ def cargar_datos_demo(
                 raise ValueError(
                     f"El paso {movimiento['orden']} usa un código no admitido en demos."
                 )
+
+        # Seguridad física: límites del modelo, tope por comando y duración total. Se revalida
+        # aquí aunque la demo se haya guardado validada (las de fábrica pueden venir de los
+        # endpoints CRUD heredados).
+        limites = dict(LIMITES_POR_OMISION)
+        id_modelo = filas_vehiculo[0].get("id_modelo")
+        if id_modelo:
+            with connection.cursor() as cursor:
+                cursor.execute(
+                    "SELECT duracion_max_paso_ms, pasos_max_demo FROM modelos_vehiculo WHERE id_modelo = %s",
+                    (id_modelo,),
+                )
+                fila_modelo = cursor.fetchone()
+            if fila_modelo:
+                limites.update({k: v for k, v in fila_modelo.items() if v})
+        errores = errores_pasos(
+            [{"id_comando": m["id_comando"], "duracion_ms": m["duracion_ms"], "pausa_ms": m["pausa_ms"]} for m in movimientos],
+            {"limites": limites, "comandos": list(comandos.values())},
+        )
+        if errores:
+            raise ValueError(f"La demo excede los límites de seguridad: {errores[0]}")
 
         return demo, movimientos
 

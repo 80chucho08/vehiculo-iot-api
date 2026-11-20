@@ -10,6 +10,8 @@ class WebSocketManager:
         self.observer_command_opt_in: set[WebSocket] = set()
         self.pending_acks: dict[str, asyncio.Future[dict]] = {}
         self.pending_demo_acks: dict[int, asyncio.Future[dict]] = {}
+        # Etapa 8: quién está detrás de cada conexión de observador (None = anónimo de transición).
+        self.actores: dict[WebSocket, object] = {}
 
     async def connect(
         self,
@@ -17,8 +19,10 @@ class WebSocketManager:
         websocket: WebSocket,
         role: str = "observador",
         recibir_comandos: bool = False,
+        actor: object = None,
     ):
         await websocket.accept()
+        self.actores[websocket] = actor
 
         if id_vehiculo not in self.connections:
             self.connections[id_vehiculo] = {}
@@ -39,6 +43,7 @@ class WebSocketManager:
 
         clientes.pop(websocket, None)
         self.observer_command_opt_in.discard(websocket)
+        self.actores.pop(websocket, None)
 
         if not clientes:
             self.connections.pop(id_vehiculo, None)
@@ -108,6 +113,34 @@ class WebSocketManager:
                 self.disconnect(id_vehiculo, websocket)
 
         return enviados
+
+    def observadores(self) -> list[tuple[int, WebSocket, object]]:
+        """(id_vehiculo, socket, actor) de todas las conexiones de observador abiertas."""
+        return [
+            (id_vehiculo, websocket, self.actores.get(websocket))
+            for id_vehiculo, clientes in list(self.connections.items())
+            for websocket, role in list(clientes.items())
+            if role == "observador"
+        ]
+
+    async def cerrar(self, id_vehiculo: int, websocket: WebSocket, codigo: int, motivo: str) -> None:
+        """Cierra una conexión por falta de permiso (4401 sin credencial válida, 4403 acceso revocado)."""
+        self.disconnect(id_vehiculo, websocket)
+        try:
+            await asyncio.wait_for(websocket.close(code=codigo, reason=motivo[:120]), timeout=2)
+        except Exception:
+            pass
+
+    async def cerrar_por_sid(self, sid: str, codigo: int, motivo: str) -> int:
+        cerradas = 0
+        for id_vehiculo, websocket, actor in self.observadores():
+            if actor is not None and getattr(actor, "sid", None) == sid:
+                await self.cerrar(id_vehiculo, websocket, codigo, motivo)
+                cerradas += 1
+        return cerradas
+
+    def conexiones_de_sid(self, sid: str) -> int:
+        return sum(1 for _, _, actor in self.observadores() if actor is not None and getattr(actor, "sid", None) == sid)
 
     def crear_espera_ack(self, id_solicitud: str) -> asyncio.Future[dict]:
         future = asyncio.get_running_loop().create_future()

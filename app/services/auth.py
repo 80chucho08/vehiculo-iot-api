@@ -10,7 +10,7 @@ from threading import Lock
 
 from app.core import seguridad
 from app.core.config import settings
-from app.repositories import sesiones, usuarios
+from app.repositories import invitados, sesiones, usuarios
 from app.services.autorizacion import Actor
 
 
@@ -101,6 +101,13 @@ def actor_desde_token(token: str) -> Actor | None:
     datos = seguridad.leer_token(token)
     if datos is None:
         return None
+    if datos.tipo == "invitado":
+        reserva = invitados.obtener_vigente(datos.sid)
+        if reserva is None:
+            return None
+        return Actor(rol="invitado", sid=reserva["sid"], nombre="Invitado",
+                     id_sesion_invitado=int(reserva["id_sesion_invitado"]),
+                     id_vehiculo_reservado=int(reserva["id_vehiculo"]))
     fila = sesiones.obtener_vigente(datos.sid)
     if fila is None or int(fila["id_usuario"]) != datos.id_usuario or not fila["activo"]:
         return None

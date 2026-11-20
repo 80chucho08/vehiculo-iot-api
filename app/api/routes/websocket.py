@@ -11,6 +11,8 @@ from fastapi.encoders import jsonable_encoder
 
 from app.core.websocket_manager import websocket_manager
 from app.db.connection import get_connection
+from app.services import acceso_wss
+from app.services.autorizacion import ANONIMO
 from app.db.procedure_executor import execute_procedure
 
 
@@ -34,10 +36,23 @@ def cargar_estado_inicial(id_vehiculo: int):
             "sp_obtener_demos",
             (id_vehiculo,),
         )
-        demos = resultados_demos[0] if resultados_demos else []
+        # El canal WSS aún no autentica (Etapa 8): solo se publican demos de fábrica, nunca privadas.
+        demos = [d for d in (resultados_demos[0] if resultados_demos else []) if d.get("tipo", "fabrica") == "fabrica"]
         return estado, demos
     finally:
         connection.close()
+
+
+GRACIA_RECONEXION_S = 15
+
+
+async def _cerrar_reserva_si_no_vuelve(sid: str) -> None:
+    """El invitado se desconectó: si no vuelve en unos segundos (recarga, red), se libera y DETIENE la unidad."""
+    from app.services.vigilante import finalizar_reserva
+
+    await asyncio.sleep(GRACIA_RECONEXION_S)
+    if websocket_manager.conexiones_de_sid(sid) == 0:
+        await finalizar_reserva(sid, "desconexion")
 
 
 @router.websocket("/ws/vehiculos/{id_vehiculo}")
@@ -52,6 +67,31 @@ async def websocket_vehiculo(
     if rol not in {"dispositivo", "observador"}:
         await websocket.close(code=1008)
         return
+
+    # ---- Etapa 8: autenticación y autorización del canal ANTES de recibir datos ----
+    actor = None
+    try:
+        if rol == "dispositivo":
+            # Preferente: cabecera X-Dispositivo-Token (no queda en logs de URL); ?token= por compatibilidad.
+            cabeceras = getattr(websocket, "headers", {}) or {}
+            token = cabeceras.get("x-dispositivo-token") or params.get("token")
+            permitido = await asyncio.to_thread(acceso_wss.dispositivo_autorizado, id_vehiculo, token)
+        elif params.get("ticket"):
+            actor = acceso_wss.consumir_ticket(str(params.get("ticket")), id_vehiculo)
+            permitido = actor is not None
+        else:
+            # Sin ticket = anónimo: solo lo que permita la regla (transición, unidad sin comprador).
+            permitido = await asyncio.to_thread(acceso_wss.puede_observar, ANONIMO, id_vehiculo)
+    except pymysql.MySQLError:
+        permitido = False
+    if not permitido:
+        # Se acepta y se cierra con código propio: si se rechazara el handshake, el navegador solo
+        # vería 1006 y no podría distinguir "sin permiso" de "sin red".
+        await websocket.accept()
+        await websocket.close(code=acceso_wss.CIERRE_SIN_CREDENCIAL, reason="Sin credencial válida para esta unidad.")
+        logger.warning("WSS rechazado rol=%s id_vehiculo=%s ticket=%s", rol, id_vehiculo, bool(params.get("ticket")))
+        return
+
     if rol == "dispositivo":
         reemplazados = await websocket_manager.reemplazar_dispositivo(id_vehiculo)
         if reemplazados:
@@ -61,7 +101,7 @@ async def websocket_vehiculo(
                 reemplazados,
             )
 
-    await websocket_manager.connect(id_vehiculo, websocket, rol, recibir_comandos)
+    await websocket_manager.connect(id_vehiculo, websocket, rol, recibir_comandos, actor=actor)
 
     try:
         # PyMySQL es síncrono: no bloquear el event loop que recibe los ACK.
@@ -220,6 +260,8 @@ async def websocket_vehiculo(
 
     finally:
         websocket_manager.disconnect(id_vehiculo, websocket)
+        if actor is not None and getattr(actor, "rol", None) == "invitado":
+            asyncio.create_task(_cerrar_reserva_si_no_vuelve(actor.sid))
         if rol == "dispositivo" and websocket_manager.connected_clients(id_vehiculo, "dispositivo") == 0:
             await websocket_manager.send_to_vehicle(
                 id_vehiculo,

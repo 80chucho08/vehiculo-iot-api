@@ -68,8 +68,9 @@ def necesita_rehash(hash_guardado: str) -> bool:
 @dataclass(frozen=True)
 class DatosToken:
     sid: str
-    id_usuario: int
+    id_usuario: int | None  # None en tokens de invitado
     expira: datetime
+    tipo: str = "usuario"  # 'usuario' | 'invitado'
 
 
 def nuevo_sid() -> str:
@@ -87,6 +88,19 @@ def emitir_token(sid: str, id_usuario: int, expira: datetime) -> str:
     return jwt.encode(carga, _SECRETO, algorithm=ALGORITMO)
 
 
+def emitir_token_invitado(sid: str, expira: datetime) -> str:
+    """Token del invitado: sin usuario; el sid es su reserva en sesiones_invitado."""
+    carga = {
+        "iss": EMISOR,
+        "sub": "invitado",
+        "tipo": "invitado",
+        "sid": sid,
+        "iat": int(ahora().replace(tzinfo=timezone.utc).timestamp()),
+        "exp": int(expira.replace(tzinfo=timezone.utc).timestamp()),
+    }
+    return jwt.encode(carga, _SECRETO, algorithm=ALGORITMO)
+
+
 def leer_token(token: str) -> DatosToken | None:
     """Devuelve los datos si la firma, el emisor y la expiración son válidos; si no, None."""
     try:
@@ -97,11 +111,10 @@ def leer_token(token: str) -> DatosToken | None:
             issuer=EMISOR,
             options={"require": ["exp", "sub", "sid", "iss"]},
         )
-        return DatosToken(
-            sid=str(carga["sid"]),
-            id_usuario=int(carga["sub"]),
-            expira=datetime.fromtimestamp(carga["exp"], timezone.utc).replace(tzinfo=None),
-        )
+        expira = datetime.fromtimestamp(carga["exp"], timezone.utc).replace(tzinfo=None)
+        if carga.get("tipo") == "invitado":
+            return DatosToken(sid=str(carga["sid"]), id_usuario=None, expira=expira, tipo="invitado")
+        return DatosToken(sid=str(carga["sid"]), id_usuario=int(carga["sub"]), expira=expira)
     except (jwt.PyJWTError, KeyError, ValueError, TypeError):
         return None
 

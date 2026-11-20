@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import secrets
 from datetime import datetime
 from typing import Literal
 
@@ -13,6 +14,7 @@ from app.api.deps import auditar, requiere_admin
 from app.api.routes.auth import PATRON_EMAIL
 from app.core import seguridad
 from app.core.websocket_manager import websocket_manager
+from app.services import acceso_wss
 from app.repositories import auditoria, inventario, propiedad, sesiones, usuarios
 from app.repositories.base import Conflicto, todas
 from app.services.autorizacion import Actor
@@ -284,6 +286,19 @@ def actualizar_permisos_comando(id_comando: int, datos: ComandoPermisos, request
             detalle={"id_vehiculo": anterior["id_vehiculo"], "antes": {k: anterior[k] for k in ("activo", "permitido_invitado", "duracion_max_ms")},
                      "despues": datos.model_dump()})
     return {"id_comando": id_comando, **datos.model_dump()}
+
+
+@router.post("/unidades/{id_vehiculo}/token-dispositivo", status_code=status.HTTP_201_CREATED, responses={404: {}})
+def generar_token_dispositivo(id_vehiculo: int, request: Request, actor: Actor = Depends(requiere_admin)) -> dict:
+    """Genera (o rota) el token del ESP8266 de la unidad. Se muestra UNA sola vez: solo se guarda su
+    SHA-256. Al rotarlo, el dispositivo con el token anterior ya no puede conectarse."""
+    if _bd(propiedad.unidad, id_vehiculo) is None:
+        raise HTTPException(status.HTTP_404_NOT_FOUND, "Vehículo no encontrado.")
+    token = secrets.token_urlsafe(32)
+    rotado = _guardar(inventario.guardar_token_dispositivo, id_vehiculo, acceso_wss.hash_token(token))
+    auditar(request, actor, "dispositivo.token_rotado" if rotado else "dispositivo.token_creado", "vehiculo", id_vehiculo)
+    return {"id_vehiculo": id_vehiculo, "token": token, "rotado": rotado,
+            "aviso": "Cópialo ahora: no se vuelve a mostrar. Va en credenciales_dispositivo.h del firmware."}
 
 
 # ---------- Dashboard y auditoría ----------

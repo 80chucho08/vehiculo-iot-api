@@ -7,7 +7,8 @@ from app.api.deps import acceso_demo, acceso_vehiculo
 from app.core.websocket_manager import websocket_manager
 from app.db.connection import get_connection
 from app.db.procedure_executor import execute_procedure
-from app.services.autorizacion import Accion
+from app.repositories.demos import visible_para
+from app.services.autorizacion import Accion, Actor
 
 router = APIRouter(
     prefix="/api",
@@ -101,12 +102,13 @@ def obtener_historial(id_vehiculo: int):
     }
 
 
-@router.get("/vehiculos/{id_vehiculo}/demos", dependencies=[Depends(acceso_vehiculo(Accion.VER))])
-def obtener_demos(id_vehiculo: int):
-    resultados = consultar_procedimiento(
-        "sp_obtener_demos",
-        (id_vehiculo,),
-    )
+@router.get("/vehiculos/{id_vehiculo}/demos")
+def obtener_demos(id_vehiculo: int, actor: Actor = Depends(acceso_vehiculo(Accion.VER))):
+    """Demos de fábrica y, de las privadas, solo las del usuario que consulta."""
+    resultados = [
+        demo for demo in consultar_procedimiento("sp_obtener_demos", (id_vehiculo,))
+        if visible_para(demo, actor.id_usuario)
+    ]
 
     return {
         "total": len(resultados),

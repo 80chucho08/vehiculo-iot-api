@@ -382,6 +382,10 @@ sp_eliminar_movimiento_demo
 
 `sp_eliminar_vehiculo` y `sp_eliminar_comando` siguen existiendo en RDS, pero **se retiraron de la lista blanca**: hacen `DELETE` físico, y las llaves foráneas borrarían en cascada el historial del vehículo o pondrían en NULL (= DETENER) el comando de filas del historial. Las bajas se hacen con `UPDATE ... SET activo = 0` parametrizado en `app/db/bajas_logicas.py`. El esquema real de referencia está en `docs/esquema_base_2026-11-18.sql`.
 
+### Despliegue de la 4.3
+
+Orden de despliegue, activación de `AUTH_OBLIGATORIA` / `DISPOSITIVO_TOKEN_OBLIGATORIO`, alta de la unidad vendida de un compañero y guion de la prueba por equipos: [`docs/despliegue_4.3.md`](docs/despliegue_4.3.md).
+
 ### Autenticación y roles (4.3)
 
 Inicio de sesión con token corto revocable, roles `admin`/`usuario` y autorización por unidad (propiedad + consentimiento de soporte) en todas las rutas. Contrato, matriz de permisos, pruebas y pasos de despliegue en [`docs/autenticacion.md`](docs/autenticacion.md).

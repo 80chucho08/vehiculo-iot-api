@@ -1,4 +1,4 @@
-# Autenticación y autorización (4.3 · Etapas 3 y 4)
+# Autenticación y autorización (4.3 · Etapas 3, 4, 6, 7 y 8)
 
 ## Modelo
 
@@ -18,6 +18,11 @@
 | Admin, unidad vendida | ✔ | 403 sin soporte · ✔ con soporte vigente (auditado) | 403 sin soporte · ✔ con soporte |
 | Anónimo con `AUTH_OBLIGATORIA=false` (transición) | ✔ sin comprador · 404 vendida | igual | igual |
 | Anónimo con `AUTH_OBLIGATORIA=true` | 401 | 401 | 401 |
+| Invitado, unidad de SU reserva vigente | ✔ | ✔ | ✔ (solo comandos `permitido_invitado` y demos de fábrica) |
+| Invitado, cualquier otra unidad | 404 | 404 | 404 |
+
+- **Acción DETENER** (`/detener` y `/demos/cancelar`): mismas reglas que OPERAR, pero la reserva de un invitado no la bloquea. Mientras hay una reserva vigente, **nadie más puede OPERAR** la unidad de exhibición (409), ni el admin; DETENER sí, siempre.
+- **Demos privadas:** solo las ve, ve sus pasos y ejecuta su dueño (404 para cualquier otro, también para el admin con soporte). Las de fábrica, quien pueda ver u operar la unidad.
 
 - La unidad ajena responde **404, idéntico al de una inexistente**, para que no se pueda averiguar qué IDs están vendidos (BOLA/IDOR).
 - `id_usuario`, rol y propietario **nunca** se toman del cliente: el actor sale del token y la base; el propietario sale de `asignaciones`.
@@ -53,12 +58,37 @@
 
 **Recuperación de contraseña:** no hay correo saliente, así que un administrador fija una contraseña temporal (`PUT /api/admin/usuarios/{id}/password`), lo que cierra las sesiones del usuario, y el usuario la cambia con `cambiar-password`. Para el propio admin, `scripts/crear_admin.py --restablecer`.
 
+## Endpoints de las Etapas 6 a 8
+
+| Método y ruta | Quién | Respuestas |
+|---|---|---|
+| `GET /api/mis-vehiculos/{id}/demos` | comprador dueño | 200 `{demos (fábrica + mis privadas, con pasos), limites, comandos}` · 404 |
+| `POST /api/mis-vehiculos/{id}/demos` `{nombre, descripcion?, activo, pasos:[{id_comando, duracion_ms, pausa_ms}]}` | comprador dueño | 201 · 404 · 422 (detalle por paso) |
+| `PUT /api/mis-vehiculos/{id}/demos/{id_demo}` (lista completa: agregar, quitar, editar y reordenar) | comprador dueño | 200 · 404 · 409 demo en curso · 422 |
+| `DELETE /api/mis-vehiculos/{id}/demos/{id_demo}` | comprador dueño | 204 · 404 · 409 |
+| `GET /api/catalogo` | público | 200 modelos publicados con su unidad de exhibición y disponibilidad (sin datos de compradores) |
+| `POST /api/invitado/sesiones` `{id_vehiculo, acepto_condiciones}` | público | 201 `{access_token, expira_en, minutos}` · 400 sin aceptar · 404 no es exhibición · 409 ocupada · 429 límite por IP |
+| `GET /api/invitado/sesion` · `DELETE /api/invitado/sesion` | invitado | 200 · 204 (libera y DETIENE la unidad) |
+| `POST /api/ws/ticket` `{id_vehiculo}` | quien pueda MONITOREAR la unidad (incl. anónimo en transición) | 200 `{ticket, vigencia_s: 30}` · 401 · 403 · 404 · 409 |
+| `POST /api/admin/unidades/{id}/token-dispositivo` | admin | 201 `{token}` (se muestra una vez; se guarda su SHA-256) · 404 |
+
+**Seguridad física de las demos** (tres capas): la API valida al guardar y otra vez al ejecutar (límites del modelo, tope por comando, 100 ms ≤ paso, pausa ≤ 10 s, demo ≤ 120 s, códigos 1–12); la base tiene CHECK de 10 s (V004); el firmware rechaza pasos fuera de 100–10 000 ms.
+
+**Invitados:** reserva de `INVITADO_MINUTOS` (5) con exclusividad garantizada por la base (UNIQUE sobre la reserva abierta). Termina y **DETIENE la unidad** al pulsar «Terminar prueba», al vencer (vigilante cada 5 s) o si el invitado se desconecta más de 15 s. Límite de `INVITADO_RESERVAS_POR_IP` (3) cada 15 min.
+
+**WSS por unidad:**
+- Navegador: pide un ticket de un solo uso (30 s) con su token y abre `/ws/vehiculos/{id}?ticket=…`; el token de sesión nunca va en la URL. Sin ticket solo entra un anónimo donde la regla lo permita (transición, unidad sin comprador). Rechazo: cierre **4401**.
+- Cada 15 s todas las conexiones pasan otra vez por la regla con datos frescos: logout, cambio de rol, fin de asignación, retiro de soporte o fin de reserva cierran el canal con **4403**.
+- ESP8266: cabecera `X-Dispositivo-Token` (o `?token=`), comparada con SHA-256 en tiempo constante. Un observador ya no puede hacerse pasar por el carrito ni desplazarlo.
+
 ## Pruebas
 
 - `tests/test_autorizacion.py` (26, sin base): matriz de la regla; User A contra User B en 8 rutas; admin sin y con soporte; token inválido, alterado (`alg: none`, otra firma), vencido, revocado o con `sid` ajeno; rol inyectado en el token, la cabecera o la query; rutas de admin; login con mensaje uniforme, bloqueo y 429. Con una mutación que desactiva la regla, 16 de ellas fallan.
 - `scripts/probar_auth_e2e.py` (39 casos contra la API real y MySQL de prueba): el flujo completo de admin → asignación → compradores → soporte → sesiones → auditoría.
+- `tests/test_demos_privadas.py` (14) y `tests/test_invitados_wss.py` (16): privacidad de demos, validación física, regla del invitado, reservas, tickets, WSS con y sin credencial, revalidación y vigilante. Total de la suite: **94**.
+- `scripts/probar_invitado_wss_e2e.py` (32 casos, ~45 s, WebSockets reales): catálogo, reserva exclusiva, límites del invitado, tickets de un solo uso, token del ESP8266, DETENER automático al vencer (historial con origen «sistema») y revocación en vivo del WSS al retirar el soporte.
 
-## Despliegue en la EC2
+## Despliegue en la EC2 (Etapas 3-4; para 6-8 ver `docs/despliegue_4.3.md`)
 
 1. `git pull`
 2. `.venv\Scripts\python -m pip install -r requirements.txt` (nuevas: PyJWT y argon2-cffi).

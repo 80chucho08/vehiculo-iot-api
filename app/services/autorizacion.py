@@ -3,7 +3,9 @@
 Acciones:
   VER          datos de catálogo de la unidad: detalle, comandos y demos.
   MONITOREAR   estado e historial (privados del comprador).
-  OPERAR       ejecutar comandos, DETENER, iniciar o cancelar demos.
+  OPERAR       ejecutar comandos e iniciar demos.
+  DETENER      DETENER y cancelar demo: mismas reglas que OPERAR, pero la reserva de un invitado
+               NO lo bloquea (detener siempre es seguro).
 
 Reglas:
   - Unidad inexistente → 404.
@@ -13,6 +15,9 @@ Reglas:
     vigente del comprador → si no, 403. Las unidades sin comprador (inventario, exhibición) sí.
   - Anónimo: con AUTH_OBLIGATORIA=false (transición de 4.1/4.2) puede VER/MONITOREAR/OPERAR
     unidades SIN comprador; una unidad vendida nunca. Con AUTH_OBLIGATORIA=true → 401.
+  - Invitado: solo la unidad de exhibición de SU reserva vigente (VER, MONITOREAR, OPERAR,
+    DETENER); cualquier otra → 404. Mientras una reserva está vigente nadie más puede OPERAR esa
+    unidad (409), ni siquiera el admin; DETENER sí.
   - Nunca se confía en rol, id_usuario ni propietario enviados por el cliente: el actor sale del
     token y se relee de la base; el propietario sale de `asignaciones`.
 """
@@ -30,15 +35,19 @@ class Accion(str, Enum):
     VER = "ver"
     MONITOREAR = "monitorear"
     OPERAR = "operar"
+    DETENER = "detener"
 
 
 @dataclass(frozen=True)
 class Actor:
-    rol: str  # 'admin' | 'usuario' | 'anonimo'
+    rol: str  # 'admin' | 'usuario' | 'invitado' | 'anonimo'
     id_usuario: int | None = None
     sid: str | None = None
     email: str | None = None
     nombre: str | None = None
+    # Solo invitados: su reserva.
+    id_sesion_invitado: int | None = None
+    id_vehiculo_reservado: int | None = None
 
     @property
     def autenticado(self) -> bool:
@@ -53,7 +62,7 @@ class Decision:
     permitido: bool
     status: int = 200
     detalle: str = ""
-    via: str = ""  # propietario | soporte | inventario | transicion
+    via: str = ""  # propietario | soporte | inventario | transicion | reserva
 
 
 def evaluar(
@@ -67,17 +76,31 @@ def evaluar(
     if unidad is None:
         return Decision(False, 404, "Vehículo no encontrado.")
     propietario = unidad.get("id_propietario")
+    reserva = unidad.get("reserva_sid")
+    reservada_por_otro = reserva is not None and not (actor.rol == "invitado" and actor.sid == reserva)
+    bloqueo = (
+        Decision(False, 409, "La unidad de exhibición está reservada por un invitado: puedes DETENERLA, no operarla.")
+        if accion is Accion.OPERAR and reservada_por_otro and propietario is None
+        else None
+    )
+
+    if actor.rol == "invitado":
+        if reserva is not None and reserva == actor.sid and unidad.get("id_vehiculo") == actor.id_vehiculo_reservado:
+            return Decision(True, via="reserva")
+        return Decision(False, 404, "Vehículo no encontrado.")
 
     if actor.rol == "usuario":
         if propietario is not None and propietario == actor.id_usuario:
             return Decision(True, via="propietario")
         if propietario is None and not obligatoria:
-            return Decision(True, via="transicion")
+            return bloqueo or Decision(True, via="transicion")
         return Decision(False, 404, "Vehículo no encontrado.")
 
     if actor.rol == "admin":
-        if accion is Accion.VER or propietario is None:
+        if accion is Accion.VER:
             return Decision(True, via="inventario")
+        if propietario is None:
+            return bloqueo or Decision(True, via="inventario")
         if soporte_vigente:
             return Decision(True, via="soporte")
         return Decision(
@@ -90,5 +113,5 @@ def evaluar(
     if obligatoria:
         return Decision(False, 401, "Inicia sesión para usar esta unidad.")
     if propietario is None:
-        return Decision(True, via="transicion")
+        return bloqueo or Decision(True, via="transicion")
     return Decision(False, 404, "Vehículo no encontrado.")
