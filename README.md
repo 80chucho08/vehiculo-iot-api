@@ -18,6 +18,7 @@ Sistema backend robusto desarrollado con **FastAPI**, **WebSockets** y **MySQL**
   - [1. Envío de Comandos Individuales](#1-envío-de-comandos-individuales)
   - [2. Ejecución de Demos y Rutinas](#2-ejecución-de-demos-y-rutinas)
   - [3. Modo Fallback (Sin Hardware Físico)](#3-modo-fallback-sin-hardware-físico)
+- [Roles y Permisos](#-roles-y-permisos)
 - [Catálogo de Endpoints REST](#-catálogo-de-endpoints-rest)
 - [Base de Datos y Procedimientos Almacenados](#-base-de-datos-y-procedimientos-almacenados)
 - [Instalación y Configuración](#-instalación-y-configuración)
@@ -35,6 +36,8 @@ El propósito central de esta API es actuar como **puente de coordinación y con
 3. **Mecanismos de Seguridad y Concurrencia**: Exclusión mutua que evita que un comando manual interrumpa o colisione con una demo en curso, y apagado de emergencia inmediato (`APAGAR_TODO`).
 4. **Soporte de Observadores y Modo Fallback**: Permite monitorear la actividad en vivo desde múltiples pantallas o probar la interfaz de control incluso cuando el vehículo físico no está conectado.
 5. **Persistencia Transaccional**: Todo comando exitoso y cambio de estado se registra en MySQL mediante procedimientos almacenados seguros.
+6. **Roles y Propiedad de Unidades**: Invitado, Usuario (comprador) y Administrador con autorización por unidad, comandos y demos propios, reportes de falla y acceso temporal de soporte (ver [Roles y Permisos](#-roles-y-permisos)).
+7. **Dispositivo Compartido**: Una unidad registrada puede usar el ESP8266 de otra, para probar con un solo carrito físico registrado como exhibición, vendido y en stock.
 
 ---
 
@@ -100,30 +103,41 @@ flowchart TD
 vehiculo_iot_api/
 ├── app/
 │   ├── api/
-│   │   ├── routes/
-│   │   │   ├── consultas.py        # Endpoints de lectura (vehículos, comandos, estado, demos)
-│   │   │   ├── operaciones.py      # Endpoints de escritura (CRUD) y despacho de comandos
-│   │   │   ├── ejecucion_demos.py  # Endpoints para iniciar y cancelar demos
-│   │   │   ├── vehiculos.py        # Endpoint catálogo general de vehículos
-│   │   │   └── websocket.py        # Endpoint y ciclo de vida de conexiones WebSocket
-│   │   └── __init__.py
+│   │   ├── deps.py                 # Dependencias de sesión, rol y autorización por unidad; auditoría
+│   │   └── routes/
+│   │       ├── auth.py             # Login, renovación, logout y cambio de contraseña (JWT corto revocable)
+│   │       ├── admin.py            # /api/admin: usuarios, inventario, modelos, asignaciones, comandos,
+│   │       │                       #   demos de cualquier unidad, reportes, dashboard y bitácora
+│   │       ├── mis_vehiculos.py    # /api/mis-vehiculos: unidades del comprador, comandos propios,
+│   │       │                       #   demos privadas, reportes de falla y soporte temporal
+│   │       ├── invitado.py         # Catálogo público y reserva temporal del invitado anónimo
+│   │       ├── wss.py              # Ticket de un solo uso para abrir el WebSocket
+│   │       ├── consultas.py        # Lectura: vehículo, comandos, estado, historial y demos
+│   │       ├── operaciones.py      # CRUD de 4.1/4.2 (solo admin) y despacho de comandos / DETENER
+│   │       ├── ejecucion_demos.py  # Iniciar y cancelar demos
+│   │       ├── vehiculos.py        # Lista general de vehículos (solo admin)
+│   │       └── websocket.py        # /ws/vehiculos/{id}: observadores y dispositivo (ESP8266)
 │   ├── core/
-│   │   ├── config.py               # Carga de variables de entorno con Pydantic Settings
-│   │   └── websocket_manager.py    # Administrador central de sockets, roles y futuros de ACK
-│   ├── db/
-│   │   ├── connection.py           # Factoría de conexiones a MySQL
-│   │   ├── procedure_executor.py   # Validador de lista permitida y llamada a callproc()
-│   │   └── operation_executor.py    # Ejecutor transaccional con commit y rollback automático
+│   │   ├── config.py               # Variables de entorno (Pydantic Settings)
+│   │   ├── seguridad.py            # Argon2id, tokens JWT y huella de IP
+│   │   └── websocket_manager.py    # Conexiones, ACK y dispositivo compartido (unidades espejo)
+│   ├── db/                         # Conexión, lista blanca de procedimientos, transacciones y bajas lógicas
+│   ├── repositories/               # SQL parametrizado: usuarios, sesiones, propiedad, inventario,
+│   │                               #   demos, comandos propios, reportes, invitados y auditoría
 │   ├── services/
-│   │   └── demo_executor.py        # Motor asíncrono que ejecuta la secuencia de una demo
-│   ├── __init__.py
-│   └── main.py                     # Inicialización de FastAPI, configuración de CORS y rutas base
-├── tests/
-│   └── test_command_flow.py        # Pruebas automatizadas de validación, concurrencia y flujo de ACKs
-├── .env.example                    # Plantilla de variables de entorno
-├── .gitignore                      # Exclusiones de Git (entornos virtuales, credenciales)
-├── requirements.txt                # Dependencias fijadas del proyecto
-└── README.md                       # Documentación principal
+│   │   ├── autorizacion.py         # Regla única de permisos por unidad (REST y WSS)
+│   │   ├── auth.py                 # Inicio de sesión, límites de intentos y actor desde el token
+│   │   ├── acceso_wss.py           # Tickets, token del ESP8266 y revalidación de conexiones
+│   │   ├── demo_executor.py        # Motor asíncrono de demos
+│   │   ├── validacion_demos.py     # Límites físicos de los pasos de una demo
+│   │   └── vigilante.py            # Reservas vencidas, revalidación del WSS y dispositivo compartido
+│   └── main.py                     # FastAPI, CORS, ciclo de vida y rutas
+├── migrations/                     # V001–V009 (UP/DOWN) con su guía y diagrama ER
+├── scripts/                        # migrar, respaldo/restaurar, crear_admin, preparar_pruebas y E2E
+├── docs/                           # autenticación, despliegue 4.3, prueba por roles y esquema base
+├── tests/                          # 107 pruebas unitarias sin base de datos (mocks)
+├── requirements.txt
+└── README.md
 ```
 
 ---
@@ -144,6 +158,10 @@ Al conectarse al WebSocket, los clientes declaran su función usando query param
 | **Dispositivo** | `?rol=dispositivo` | Reservado para el **microcontrolador físico**. Recibe los comandos físicos y envía confirmaciones (`comando_ack`, `demo_ack`). Si se conecta un nuevo dispositivo con el mismo ID, la conexión previa se cierra limpiamente (código `1012`). |
 | **Observador** | `?rol=observador` *(por defecto)* | Usado por **interfaces web o paneles de supervisión**. Recibe notificaciones de estado y eventos en tiempo real. En la ruta alterna (sin dispositivo), recibe los mensajes `comando_individual` para pruebas y simulación sin requerir flags adicionales. |
 | **Observador (Compatibilidad)** | `?rol=observador&recibir_comandos=1` | Parámetro aceptado por compatibilidad histórica; ya no es necesario para recibir comandos en la ruta alterna. |
+
+**Credenciales del canal (4.3):** el navegador pide primero `POST /api/ws/ticket` con su token y abre `?ticket=…` (un solo uso, 30 s); el token de sesión nunca va en la URL. El ESP8266 envía la cabecera `X-Dispositivo-Token` (o `?token=`), generada en ADMINISTRACIÓN → Inventario → Token ESP. Cada 15 s las conexiones se revalidan: si se pierde el permiso, se cierran con `4403`.
+
+**Dispositivo compartido (V009):** si una unidad tiene `id_unidad_fisica`, la API manda sus órdenes al ESP8266 de esa otra unidad reescribiendo `id_vehiculo` (el firmware solo acepta el suyo), y avisa `dispositivo_estado` a los observadores de todas las unidades que lo comparten. Se configura en Inventario → Editar → «Dispositivo (ESP8266)».
 
 ---
 
@@ -297,9 +315,25 @@ Cuando se prueba la plataforma, se desarrolla el frontend o el vehículo físico
 
 ---
 
+## 👥 Roles y Permisos
+
+Todas las rutas exigen sesión (`AUTH_OBLIGATORIA=true` en producción). El rol y el dueño se leen de la base en cada petición; nunca se toman del cliente. Una unidad ajena responde **404**, igual que una inexistente.
+
+| Rol | Unidades que controla | Comandos | Demos |
+| :--- | :--- | :--- | :--- |
+| **Invitado** (cuenta `invitado`, o reserva anónima de 5 min desde el catálogo) | Solo las de **exhibición** | Ejecuta los marcados «Invitados» por el admin; no crea ni borra | Ejecuta las de fábrica; no crea ni borra |
+| **Usuario** (comprador) | Solo la que tiene **asignada** | Crea comandos propios a partir de un movimiento ya registrado (otro código → 422) y borra solo los suyos | Crea, edita (agregar/quitar/reordenar pasos) y borra solo las suyas; las de fábrica son de solo lectura |
+| **Administrador** | Exhibición y stock; una **vendida** solo con autorización de soporte vigente del comprador (si no, 403) | Crea, edita, desactiva y gestiona los permisos de invitado de todos | Crea de fábrica y edita/borra **cualquiera**, incluso las privadas (gestionar no es ejecutar) |
+
+**Acceso temporal:** el comprador reporta una falla (`POST /api/mis-vehiculos/{id}/reportes`) y puede autorizar soporte por 15 min a 24 h; el admin lo atiende en Reportes y, al marcarlo «resuelto», la autorización se revoca y su WebSocket se cierra. El comprador también puede otorgarla o revocarla en cualquier momento.
+
+Matriz completa y tokens en [`docs/autenticacion.md`](docs/autenticacion.md); guion de la prueba con las tres cuentas en [`docs/prueba_roles.md`](docs/prueba_roles.md).
+
+---
+
 ## 📡 Catálogo de Endpoints REST
 
-La API documenta todos sus esquemas interactivamente a través de **Swagger UI** en `/docs`.
+La API documenta todos sus esquemas interactivamente a través de **Swagger UI** en `/docs` (73 operaciones). Las tablas 2, 3 y 5 son las rutas originales de 4.1/4.2: las de escritura son **solo para el administrador**.
 
 ### 1. Estado y Diagnóstico General
 
@@ -358,6 +392,25 @@ La API documenta todos sus esquemas interactivamente a través de **Swagger UI**
 | `GET` | `/api/vehiculos/{id}/historial` | Consulta el registro histórico de eventos del vehículo. | `200 OK` |
 | `POST` | `/api/vehiculos/{id}/historial` | Registra manualmente un evento en el historial. | `201 Created` |
 
+### 7. Sesión, comprador y administración (4.3 y V009)
+
+| Método | Ruta | Quién | Descripción |
+| :--- | :--- | :--- | :--- |
+| `POST` | `/api/auth/login` · `renovar` · `logout` · `GET /api/auth/yo` | todos | Sesión con token de 30 min, renovable hasta 8 h |
+| `GET` | `/api/mis-vehiculos` | usuario | Sus unidades, soporte vigente y reportes abiertos |
+| `GET` `POST` `DELETE` | `/api/mis-vehiculos/{id}/comandos[/{id_comando}]` | usuario | Comandos propios y movimientos base disponibles |
+| `GET` `POST` `PUT` `DELETE` | `/api/mis-vehiculos/{id}/demos[/{id_demo}]` | usuario | Demos privadas (lista completa de pasos en cada guardado) |
+| `GET` `POST` | `/api/mis-vehiculos/{id}/reportes` | usuario | Reportar falla y, opcionalmente, autorizar soporte |
+| `POST` `DELETE` | `/api/mis-vehiculos/{id}/soporte` | usuario | Otorgar o revocar el acceso temporal |
+| `GET` `POST` | `/api/catalogo` · `/api/invitado/sesiones` | público | Catálogo y reserva temporal del invitado anónimo |
+| `POST` | `/api/ws/ticket` | con acceso a la unidad | Ticket de un solo uso para el WebSocket |
+| `GET` `POST` `PUT` | `/api/admin/usuarios[/{id}]` | admin | Cuentas con rol `admin`, `usuario` o `invitado` |
+| `GET` `POST` `PUT` | `/api/admin/inventario` · `modelos` · `unidades` | admin | Unidades (incluye `id_unidad_fisica`), modelos y token del ESP8266 |
+| `GET` `PUT` | `/api/admin/unidades/{id}/comandos` · `/api/admin/comandos/{id}` | admin | Todos los comandos con su dueño; activo, invitados y tope |
+| `GET` `POST` `PUT` `DELETE` | `/api/admin/unidades/{id}/demos` · `/api/admin/demos/{id}` | admin | Gestión de cualquier demo |
+| `GET` `PUT` | `/api/admin/reportes[/{id}]` | admin | Revisar y resolver (revoca el soporte) |
+| `GET` `POST` | `/api/admin/asignaciones` · `dashboard` · `auditoria` | admin | Ventas, métricas y bitácora |
+
 ---
 
 ## 🗄 Base de Datos y Procedimientos Almacenados
@@ -392,7 +445,7 @@ Inicio de sesión con token corto revocable, roles `admin`/`usuario` y autorizac
 
 ### Migraciones (4.3)
 
-El esquema se amplía con migraciones versionadas UP/DOWN en [`migrations/`](migrations/README.md): usuarios y sesiones, modelos y unidades, asignaciones, demos privadas, sesiones de invitado, auditoría, autoría del historial y FK en RESTRICT. Se aplican con `scripts/migrar.py`, después de un respaldo verificable con `scripts/respaldo_bd.py`. La guía tiene el diagrama ER, el checklist y el plan de reversión.
+El esquema se amplía con migraciones versionadas UP/DOWN en [`migrations/`](migrations/README.md): usuarios y sesiones, modelos y unidades, asignaciones, demos privadas, sesiones de invitado, auditoría, autoría del historial, FK en RESTRICT y, en **V009**, rol `invitado`, comandos propios, reportes de falla y dispositivo compartido. Se aplican con `scripts/migrar.py`, después de un respaldo verificable con `scripts/respaldo_bd.py`. La guía tiene el diagrama ER, el checklist y el plan de reversión.
 
 Cada conexión de la API abre la sesión con `sql_mode` estricto y `time_zone` UTC (`app/db/connection.py`). Así, un valor fuera de rango falla en vez de truncarse en silencio.
 
@@ -445,6 +498,10 @@ Crea un archivo llamado `.env` en la raíz del proyecto basándote en la siguien
 | `DB_CONNECT_TIMEOUT` | Tiempo límite de espera para conectar (segundos) | `10` | No (por defecto 10) |
 | `APP_NAME` | Título del servicio reportado en OpenAPI | `API Vehiculo IoT` | No |
 | `APP_ENV` | Identificador de entorno (`development` / `production`) | `development` | No |
+| `AUTH_SECRET` | Secreto para firmar los tokens (generar con `secrets.token_urlsafe(48)`); sin él, las sesiones caducan al reiniciar | — | Sí en producción |
+| `AUTH_OBLIGATORIA` | `true` exige sesión en CONTROL y MONITOREO (producción); `false` es el modo de transición | `true` | No (por defecto false) |
+| `DISPOSITIVO_TOKEN_OBLIGATORIO` | `true` rechaza un ESP8266 sin token registrado | `true` | No (por defecto false) |
+| `INVITADO_MINUTOS` | Duración de la reserva del invitado anónimo | `5` | No |
 
 Ejemplo de archivo `.env`:
 ```dotenv
@@ -472,17 +529,24 @@ uvicorn app.main:app --reload --host 0.0.0.0 --port 8000
 
 ## 🧪 Ejecución de Pruebas
 
-El proyecto cuenta con una suite completa de pruebas unitarias y asíncronas (`tests/test_command_flow.py` y `tests/test_detener_y_bajas.py`, 37 en total) que validan el flujo de comandos, timeouts, validaciones de entidad y concurrencia sin requerir una base de datos activa (utilizando mocks):
+La suite tiene **107 pruebas** unitarias y asíncronas en 6 archivos (`test_command_flow`, `test_detener_y_bajas`, `test_autorizacion`, `test_demos_privadas`, `test_invitados_wss` y `test_roles_v009`). Cubren el flujo de comandos y ACK, DETENER, bajas lógicas, la matriz de permisos, demos privadas, invitados, WebSocket autenticado, comandos propios, reportes y dispositivo compartido, sin base de datos (mocks):
 
 ```bash
-# Ejecutar todas las pruebas con unittest
 python -m unittest discover tests
 ```
+
+Pruebas de punta a punta contra una API real:
+
+```bash
+python scripts/probar_roles_e2e.py --api https://vehiculo-iot-itp.duckdns.org --cuentas cuentas_prueba.local.txt
+```
+
+`scripts/preparar_pruebas.py` deja listas (de forma idempotente) las cuentas de Invitado, Usuario y Administrador y las unidades que comparten el ESP8266; escribe las contraseñas solo en `cuentas_prueba.local.txt` (ignorado por git). `probar_roles_e2e.py` (48 casos) mueve brevemente la garra si el carrito está conectado. También están `probar_auth_e2e.py` y `probar_invitado_wss_e2e.py`.
 
 ---
 
 ## 🔒 Consideraciones de Seguridad y CORS
 
-1. **CORS:** El archivo `app/main.py` define una política estricta de orígenes permitidos que incluye entornos locales (`localhost:3000`) y la URL de producción alojada en GitHub Pages (`https://80chucho08.github.io`).
-2. **Entornos Públicos:** La API no incluye por defecto autenticación basada en tokens JWT. Si se expone a Internet, se recomienda colocarla detrás de un proxy inverso seguro (como Caddy o Nginx) con autenticación o en una red VPN privada.
+1. **CORS:** El archivo `app/main.py` define una política estricta de orígenes permitidos que incluye entornos locales (`localhost:3000`) y la URL de producción alojada en GitHub Pages (`https://80chucho08.github.io`). CORS no sustituye la autorización: cada ruta valida rol y propiedad.
+2. **Autenticación:** tokens JWT de 30 min revocables (sesión en base de datos), contraseñas con Argon2id, bloqueo tras 5 intentos y límite por IP. La API corre detrás de Caddy (TLS) en la EC2. Toda acción administrativa y todo acceso denegado queda en la bitácora `auditoria`.
 3. **Certificados TLS para WebSockets (WSS):** El cliente ESP8266 requiere validar la cadena SSL mediante la autoridad certificadora raíz (CA) configurada en su firmware para conexiones seguras sobre WSS.
