@@ -31,6 +31,12 @@ def unidad(id_vehiculo: int) -> dict[str, Any] | None:
     )
 
 
+def espejos() -> dict[int, int]:
+    """V009: unidades activas que usan el ESP8266 de otra unidad (dispositivo compartido)."""
+    filas = todas("SELECT id_vehiculo, id_unidad_fisica FROM vehiculos WHERE id_unidad_fisica IS NOT NULL AND activo = 1")
+    return {int(f["id_vehiculo"]): int(f["id_unidad_fisica"]) for f in filas}
+
+
 def soporte_vigente(id_vehiculo: int, id_admin: int) -> dict[str, Any] | None:
     return una(
         "SELECT id_autorizacion, expira_en FROM autorizaciones_soporte "
@@ -43,6 +49,7 @@ def soporte_vigente(id_vehiculo: int, id_admin: int) -> dict[str, Any] | None:
 
 _COLUMNAS_UNIDAD = (
     "v.id_vehiculo, v.nombre, v.numero_serie, v.tipo_unidad, v.activo, v.microcontrolador, v.descripcion, "
+    "v.id_unidad_fisica, "
     "m.id_modelo, m.nombre AS modelo, "
     "e.conectado, e.fecha_actualizacion, c.nombre AS ultimo_comando, c.codigo AS ultimo_codigo"
 )
@@ -62,7 +69,9 @@ def mis_vehiculos(id_usuario: int) -> list[dict[str, Any]]:
         "       EXISTS(SELECT 1 FROM historial_comandos h WHERE h.id_vehiculo = v.id_vehiculo) AS con_historial, "
         "       (SELECT MAX(s.expira_en) FROM autorizaciones_soporte s "
         "         WHERE s.id_vehiculo = v.id_vehiculo AND s.revocada_en IS NULL "
-        "           AND s.expira_en > UTC_TIMESTAMP()) AS soporte_hasta "
+        "           AND s.expira_en > UTC_TIMESTAMP()) AS soporte_hasta, "
+        "       (SELECT COUNT(*) FROM reportes_falla r WHERE r.id_vehiculo = v.id_vehiculo "
+        "         AND r.id_usuario = a.id_usuario AND r.estado <> 'resuelto') AS reportes_abiertos "
         f"{_JOIN_UNIDAD} JOIN asignaciones a ON a.vehiculo_activo = v.id_vehiculo AND a.id_usuario = %s "
         " ORDER BY v.id_vehiculo",
         (id_usuario,),

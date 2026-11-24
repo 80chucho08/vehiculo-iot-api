@@ -86,7 +86,7 @@ def actor_vigente(actor: Actor | None) -> Actor | None:
     """Relee de la base la sesión del actor (rol y estado actuales). None si ya no es válida."""
     if actor is None or actor.rol == "anonimo":
         return ANONIMO
-    if actor.rol == "invitado":
+    if actor.es_reserva:
         reserva = invitados.obtener_vigente(actor.sid)
         return actor if reserva else None
     fila = sesiones.obtener_vigente(actor.sid)

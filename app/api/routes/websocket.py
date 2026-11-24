@@ -120,15 +120,7 @@ async def websocket_vehiculo(
         )
 
         if rol == "dispositivo":
-            await websocket_manager.send_to_vehicle(
-                id_vehiculo,
-                {
-                    "tipo": "dispositivo_estado",
-                    "id_vehiculo": id_vehiculo,
-                    "conectado": True,
-                },
-                role="observador",
-            )
+            await websocket_manager.avisar_estado_dispositivo(id_vehiculo, True)
 
         # Los ACK relacionan el despacho del firmware con una solicitud REST.
         while True:
@@ -218,15 +210,7 @@ async def websocket_vehiculo(
             elif rol == "dispositivo" and mensaje.get("tipo") == "dispositivo_estado":
                 conectado = mensaje.get("conectado")
                 if isinstance(conectado, bool):
-                    await websocket_manager.send_to_vehicle(
-                        id_vehiculo,
-                        {
-                            "tipo": "dispositivo_estado",
-                            "id_vehiculo": id_vehiculo,
-                            "conectado": conectado,
-                        },
-                        role="observador",
-                    )
+                    await websocket_manager.avisar_estado_dispositivo(id_vehiculo, conectado)
                 else:
                     logger.warning(
                         "Mensaje de estado rechazado: conectado no es booleano "
@@ -260,15 +244,7 @@ async def websocket_vehiculo(
 
     finally:
         websocket_manager.disconnect(id_vehiculo, websocket)
-        if actor is not None and getattr(actor, "rol", None) == "invitado":
+        if actor is not None and getattr(actor, "es_reserva", False):
             asyncio.create_task(_cerrar_reserva_si_no_vuelve(actor.sid))
         if rol == "dispositivo" and websocket_manager.connected_clients(id_vehiculo, "dispositivo") == 0:
-            await websocket_manager.send_to_vehicle(
-                id_vehiculo,
-                {
-                    "tipo": "dispositivo_estado",
-                    "id_vehiculo": id_vehiculo,
-                    "conectado": False,
-                },
-                role="observador",
-            )
+            await websocket_manager.avisar_estado_dispositivo(id_vehiculo, False)

@@ -15,8 +15,11 @@ Reglas:
     vigente del comprador → si no, 403. Las unidades sin comprador (inventario, exhibición) sí.
   - Anónimo: con AUTH_OBLIGATORIA=false (transición de 4.1/4.2) puede VER/MONITOREAR/OPERAR
     unidades SIN comprador; una unidad vendida nunca. Con AUTH_OBLIGATORIA=true → 401.
-  - Invitado: solo la unidad de exhibición de SU reserva vigente (VER, MONITOREAR, OPERAR,
-    DETENER); cualquier otra → 404. Mientras una reserva está vigente nadie más puede OPERAR esa
+  - Invitado (reserva anónima del catálogo): solo la unidad de exhibición de SU reserva vigente
+    (VER, MONITOREAR, OPERAR, DETENER); cualquier otra → 404.
+  - Cuenta de invitado (rol 'invitado' en usuarios, V009): cualquier unidad de EXHIBICIÓN activa y
+    sin comprador; una vendida, en inventario o simulada → 404. Respeta la reserva de un invitado
+    anónimo (409 al OPERAR). Solo comandos `permitido_invitado` y demos de fábrica (deps.py). Mientras una reserva está vigente nadie más puede OPERAR esa
     unidad (409), ni siquiera el admin; DETENER sí.
   - Nunca se confía en rol, id_usuario ni propietario enviados por el cliente: el actor sale del
     token y se relee de la base; el propietario sale de `asignaciones`.
@@ -40,7 +43,7 @@ class Accion(str, Enum):
 
 @dataclass(frozen=True)
 class Actor:
-    rol: str  # 'admin' | 'usuario' | 'invitado' | 'anonimo'
+    rol: str  # 'admin' | 'usuario' | 'invitado' (cuenta o reserva) | 'anonimo'
     id_usuario: int | None = None
     sid: str | None = None
     email: str | None = None
@@ -53,6 +56,11 @@ class Actor:
     def autenticado(self) -> bool:
         return self.id_usuario is not None
 
+    @property
+    def es_reserva(self) -> bool:
+        """Invitado anónimo del catálogo (token de reserva, sin cuenta)."""
+        return self.rol == "invitado" and self.id_usuario is None
+
 
 ANONIMO = Actor(rol="anonimo")
 
@@ -62,7 +70,7 @@ class Decision:
     permitido: bool
     status: int = 200
     detalle: str = ""
-    via: str = ""  # propietario | soporte | inventario | transicion | reserva
+    via: str = ""  # propietario | soporte | inventario | transicion | reserva | exhibicion
 
 
 def evaluar(
@@ -77,12 +85,17 @@ def evaluar(
         return Decision(False, 404, "Vehículo no encontrado.")
     propietario = unidad.get("id_propietario")
     reserva = unidad.get("reserva_sid")
-    reservada_por_otro = reserva is not None and not (actor.rol == "invitado" and actor.sid == reserva)
+    reservada_por_otro = reserva is not None and not (actor.es_reserva and actor.sid == reserva)
     bloqueo = (
         Decision(False, 409, "La unidad de exhibición está reservada por un invitado: puedes DETENERLA, no operarla.")
         if accion is Accion.OPERAR and reservada_por_otro and propietario is None
         else None
     )
+
+    if actor.rol == "invitado" and actor.id_usuario is not None:
+        if unidad.get("tipo_unidad") == "exhibicion" and unidad.get("activo", 1) and propietario is None:
+            return bloqueo or Decision(True, via="exhibicion")
+        return Decision(False, 404, "Vehículo no encontrado.")
 
     if actor.rol == "invitado":
         if reserva is not None and reserva == actor.sid and unidad.get("id_vehiculo") == actor.id_vehiculo_reservado:

@@ -172,15 +172,18 @@ def acceso_demo(accion: Accion) -> Callable[..., Actor]:
 
 
 def comando_permitido_al_actor(id_vehiculo: int, id_comando: int, actor: Actor = Depends(actor_actual)) -> None:
-    """Un invitado solo puede ejecutar los comandos marcados como permitido_invitado (Inventario)."""
-    if actor.rol != "invitado":
-        return
+    """Invitados (reserva o cuenta): solo comandos marcados como permitido_invitado (Inventario).
+    Un comando propio de un usuario solo lo ejecuta su dueño (o el admin con acceso a la unidad)."""
     try:
-        fila = una("SELECT permitido_invitado FROM comandos WHERE id_comando = %s AND id_vehiculo = %s",
+        fila = una("SELECT permitido_invitado, tipo, id_propietario FROM comandos WHERE id_comando = %s AND id_vehiculo = %s",
                    (id_comando, id_vehiculo))
     except pymysql.MySQLError:
         raise HTTPException(status.HTTP_503_SERVICE_UNAVAILABLE, "No fue posible verificar el comando.") from None
-    if fila is None or not fila["permitido_invitado"]:
+    if fila is None:
+        return  # la ruta responde su propio 404
+    if fila.get("tipo") == "usuario" and actor.rol != "admin" and fila.get("id_propietario") != actor.id_usuario:
+        raise HTTPException(status.HTTP_404_NOT_FOUND, "Comando no encontrado.")
+    if actor.rol == "invitado" and not fila["permitido_invitado"]:
         raise HTTPException(status.HTTP_403_FORBIDDEN, "Ese comando no está disponible en la prueba de invitado.")
 
 

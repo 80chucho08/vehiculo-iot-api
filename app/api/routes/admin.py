@@ -14,14 +14,18 @@ from app.api.deps import auditar, requiere_admin
 from app.api.routes.auth import PATRON_EMAIL
 from app.core import seguridad
 from app.core.websocket_manager import websocket_manager
-from app.services import acceso_wss
-from app.repositories import auditoria, inventario, propiedad, sesiones, usuarios
+from app.services import acceso_wss, validacion_demos
+from app.services.demo_executor import demo_execution_manager
+from app.services.vigilante import refrescar_espejos
+from app.repositories import auditoria, inventario, propiedad, reportes, sesiones, usuarios
+from app.repositories import comandos as repo_comandos
+from app.repositories import demos as repo_demos
 from app.repositories.base import Conflicto, todas
 from app.services.autorizacion import Actor
 
 router = APIRouter(prefix="/api/admin", tags=["Administración"], dependencies=[Depends(requiere_admin)])
 
-Rol = Literal["admin", "usuario"]
+Rol = Literal["admin", "usuario", "invitado"]
 
 
 class Pagina(BaseModel):
@@ -207,6 +211,7 @@ class UnidadActualizar(BaseModel):
     descripcion: str | None = Field(None, max_length=255)
     microcontrolador: str | None = Field(None, max_length=50)
     activo: bool
+    id_unidad_fisica: int | None = Field(None, ge=1, description="Usa el ESP8266 de esta otra unidad (dispositivo compartido)")
 
 
 class ComandoPermisos(BaseModel):
@@ -266,13 +271,14 @@ def crear_unidad(datos: UnidadCrear, request: Request, actor: Actor = Depends(re
 
 
 @router.put("/unidades/{id_vehiculo}", responses={404: {}, 409: {"description": "Serie repetida o unidad vendida"}})
-def actualizar_unidad(id_vehiculo: int, datos: UnidadActualizar, request: Request, actor: Actor = Depends(requiere_admin)) -> dict:
+async def actualizar_unidad(id_vehiculo: int, datos: UnidadActualizar, request: Request, actor: Actor = Depends(requiere_admin)) -> dict:
     valores = datos.model_dump()
     valores["nombre"] = valores["nombre"].strip()
     anterior = _guardar(inventario.actualizar_unidad, id_vehiculo, valores)
     cambios = {k: {"antes": anterior.get(k), "despues": v} for k, v in valores.items()
                if (int(v) if isinstance(v, bool) else v) != anterior.get(k)}
     auditar(request, actor, "vehiculo.actualizar", "vehiculo", id_vehiculo, detalle=cambios)
+    await refrescar_espejos()
     return {"id_vehiculo": id_vehiculo, "cambios": list(cambios)}
 
 
@@ -315,6 +321,7 @@ def dashboard() -> dict:
             " (SELECT COUNT(*) FROM demos WHERE activo = 1) AS demos_activas,"
             " (SELECT COUNT(*) FROM sesiones_invitado WHERE finalizada_en IS NULL AND expira_en > UTC_TIMESTAMP()) AS reservas_invitado_activas,"
             " (SELECT COUNT(*) FROM autorizaciones_soporte WHERE revocada_en IS NULL AND expira_en > UTC_TIMESTAMP()) AS soportes_vigentes,"
+            " (SELECT COUNT(*) FROM reportes_falla WHERE estado <> 'resuelto') AS reportes_abiertos,"
             " (SELECT COUNT(*) FROM historial_comandos WHERE fecha_hora >= UTC_TIMESTAMP() - INTERVAL 24 HOUR) AS movimientos_24h,"
             " (SELECT COUNT(*) FROM auditoria WHERE resultado = 'denegado' AND fecha >= UTC_TIMESTAMP() - INTERVAL 24 HOUR) AS accesos_denegados_24h"
         ),
@@ -344,3 +351,128 @@ def listar_auditoria(
 ) -> Pagina:
     total, items = _bd(auditoria.listar, pagina, por_pagina, accion, recurso, id_actor, resultado, desde, hasta)
     return Pagina(total=total, pagina=pagina, por_pagina=por_pagina, items=items)
+
+
+# ---------- Comandos y demos de cualquier unidad (V009) ----------
+
+@router.get("/unidades/{id_vehiculo}/comandos", responses={404: {}})
+def comandos_de_unidad(id_vehiculo: int) -> dict:
+    """Todos los comandos (de fábrica y propios de usuarios, activos o no) con su dueño."""
+    if _bd(propiedad.unidad, id_vehiculo) is None:
+        raise HTTPException(status.HTTP_404_NOT_FOUND, "Vehículo no encontrado.")
+    filas = _bd(repo_comandos.de_unidad_admin, id_vehiculo)
+    return {"total": len(filas), "comandos": filas}
+
+
+class PasoDemoAdmin(BaseModel):
+    id_comando: int = Field(ge=1)
+    duracion_ms: int = Field(ge=100, le=10_000)
+    pausa_ms: int = Field(0, ge=0, le=10_000)
+
+
+class DemoAdmin(BaseModel):
+    nombre: str = Field(min_length=1, max_length=80)
+    descripcion: str | None = Field(None, max_length=255)
+    activo: bool = True
+    pasos: list[PasoDemoAdmin] = Field(min_length=1, max_length=50)
+
+
+def _pasos_validos(id_vehiculo: int, datos: DemoAdmin) -> list[dict]:
+    pasos = [p.model_dump() for p in datos.pasos]
+    errores = validacion_demos.errores_pasos(pasos, _bd(repo_demos.contexto_unidad, id_vehiculo, None, True))
+    if errores:
+        raise HTTPException(status.HTTP_422_UNPROCESSABLE_CONTENT,
+                            detail=[{"loc": ["body", "pasos"], "msg": e, "type": "demo_insegura"} for e in errores])
+    return pasos
+
+
+def _demo_editable(id_demo: int) -> dict:
+    demo = _bd(repo_demos.demo, id_demo)
+    if demo is None:
+        raise HTTPException(status.HTTP_404_NOT_FOUND, "Demo no encontrada.")
+    if demo_execution_manager.demo_activa(int(demo["id_vehiculo"])):
+        raise HTTPException(status.HTTP_409_CONFLICT, "Hay una demo ejecutándose en esa unidad; detenla antes de editar.")
+    return demo
+
+
+@router.get("/unidades/{id_vehiculo}/demos", responses={404: {}})
+def demos_de_unidad(id_vehiculo: int) -> dict:
+    """Gestión (no ejecución): el admin ve y edita TODAS las demos, también las privadas de un
+    comprador. Ejecutarlas en una unidad vendida sigue exigiendo su autorización de soporte."""
+    if _bd(propiedad.unidad, id_vehiculo) is None:
+        raise HTTPException(status.HTTP_404_NOT_FOUND, "Vehículo no encontrado.")
+    contexto = _bd(repo_demos.contexto_unidad, id_vehiculo, None, True)
+    return {
+        "demos": _bd(repo_demos.demos_de_unidad_admin, id_vehiculo),
+        "limites": {**contexto["limites"], "paso_min_ms": validacion_demos.PASO_MIN_MS,
+                    "pausa_max_ms": validacion_demos.PAUSA_MAX_MS, "total_max_ms": validacion_demos.TOTAL_MAX_MS},
+        "comandos": [c for c in contexto["comandos"] if c["activo"] and 1 <= int(c["codigo"]) <= 12],
+    }
+
+
+@router.post("/unidades/{id_vehiculo}/demos", status_code=status.HTTP_201_CREATED, responses={404: {}, 422: {}})
+def crear_demo_fabrica(id_vehiculo: int, datos: DemoAdmin, request: Request, actor: Actor = Depends(requiere_admin)) -> dict:
+    """Demo predeterminada (de fábrica): el comprador la ve y ejecuta, pero no la modifica."""
+    if _bd(propiedad.unidad, id_vehiculo) is None:
+        raise HTTPException(status.HTTP_404_NOT_FOUND, "Vehículo no encontrado.")
+    pasos = _pasos_validos(id_vehiculo, datos)
+    id_demo = _guardar(repo_demos.crear_fabrica, id_vehiculo, datos.nombre.strip(), datos.descripcion, datos.activo, pasos)
+    auditar(request, actor, "demo.crear", "demo", id_demo, detalle={"id_vehiculo": id_vehiculo, "pasos": len(pasos)})
+    return {"id_demo": id_demo, "pasos": len(pasos)}
+
+
+@router.put("/demos/{id_demo}", responses={404: {}, 409: {}, 422: {}})
+def actualizar_demo(id_demo: int, datos: DemoAdmin, request: Request, actor: Actor = Depends(requiere_admin)) -> dict:
+    """Nombre y lista COMPLETA de pasos de cualquier demo (agregar, quitar, editar, reordenar)."""
+    demo = _demo_editable(id_demo)
+    pasos = _pasos_validos(int(demo["id_vehiculo"]), datos)
+    if not _guardar(repo_demos.reemplazar_admin, id_demo, datos.nombre.strip(), datos.descripcion, datos.activo, pasos):
+        raise HTTPException(status.HTTP_404_NOT_FOUND, "Demo no encontrada.")
+    auditar(request, actor, "demo.actualizar", "demo", id_demo,
+            detalle={"id_vehiculo": demo["id_vehiculo"], "tipo": demo["tipo"], "id_propietario": demo["id_propietario"],
+                     "pasos": len(pasos)})
+    return {"id_demo": id_demo, "pasos": len(pasos)}
+
+
+@router.delete("/demos/{id_demo}", status_code=status.HTTP_204_NO_CONTENT, responses={404: {}, 409: {}})
+def eliminar_demo(id_demo: int, request: Request, actor: Actor = Depends(requiere_admin)) -> Response:
+    demo = _demo_editable(id_demo)
+    if not _guardar(repo_demos.eliminar_admin, id_demo):
+        raise HTTPException(status.HTTP_404_NOT_FOUND, "Demo no encontrada.")
+    auditar(request, actor, "demo.eliminar", "demo", id_demo,
+            detalle={"id_vehiculo": demo["id_vehiculo"], "tipo": demo["tipo"], "id_propietario": demo["id_propietario"]})
+    return Response(status_code=status.HTTP_204_NO_CONTENT)
+
+
+# ---------- Reportes de falla (V009) ----------
+
+EstadoReporte = Literal["abierto", "en_revision", "resuelto"]
+
+
+class ReporteAtender(BaseModel):
+    estado: Literal["en_revision", "resuelto"]
+    respuesta: str | None = Field(None, max_length=500)
+
+
+@router.get("/reportes", response_model=Pagina)
+def listar_reportes(
+    pagina: int = Query(1, ge=1),
+    por_pagina: int = Query(20, ge=1, le=100),
+    estado: EstadoReporte | None = None,
+) -> Pagina:
+    total, items = _bd(reportes.listar, pagina, por_pagina, estado)
+    return Pagina(total=total, pagina=pagina, por_pagina=por_pagina, items=items)
+
+
+@router.put("/reportes/{id_reporte}", responses={404: {}, 409: {}})
+async def atender_reporte(id_reporte: int, datos: ReporteAtender, request: Request,
+                          actor: Actor = Depends(requiere_admin)) -> dict:
+    """Al marcarlo «resuelto» se revoca el soporte vigente de la unidad: el acceso temporal termina."""
+    respuesta = datos.respuesta.strip() if datos.respuesta and datos.respuesta.strip() else None
+    anterior = _guardar(reportes.actualizar, id_reporte, datos.estado, respuesta, actor.id_usuario)
+    auditar(request, actor, f"reporte.{datos.estado}", "vehiculo", anterior["id_vehiculo"],
+            detalle={"id_reporte": id_reporte, "antes": anterior["estado"], "soportes_revocados": anterior["soportes_revocados"]})
+    if anterior["soportes_revocados"]:
+        # Corta ya el WSS del admin en esa unidad (sin esperar la revalidación de 15 s).
+        await acceso_wss.revalidar_conexiones()
+    return {"id_reporte": id_reporte, "estado": datos.estado, "soportes_revocados": anterior["soportes_revocados"]}

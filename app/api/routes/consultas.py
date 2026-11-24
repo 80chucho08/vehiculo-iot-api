@@ -60,12 +60,14 @@ def obtener_vehiculo(id_vehiculo: int):
     return resultados[0]
 
 
-@router.get("/vehiculos/{id_vehiculo}/comandos", dependencies=[Depends(acceso_vehiculo(Accion.VER))])
-def obtener_comandos(id_vehiculo: int):
-    resultados = consultar_procedimiento(
-        "sp_obtener_comandos_vehiculo",
-        (id_vehiculo,),
-    )
+@router.get("/vehiculos/{id_vehiculo}/comandos")
+def obtener_comandos(id_vehiculo: int, actor: Actor = Depends(acceso_vehiculo(Accion.VER))):
+    """Comandos de fábrica y, de los propios (V009), solo los del usuario que consulta; el admin ve todos."""
+    resultados = [
+        comando for comando in consultar_procedimiento("sp_obtener_comandos_vehiculo", (id_vehiculo,))
+        if actor.rol == "admin" or comando.get("tipo", "fabrica") == "fabrica"
+        or (actor.id_usuario is not None and comando.get("id_propietario") == actor.id_usuario)
+    ]
 
     return {
         "total": len(resultados),

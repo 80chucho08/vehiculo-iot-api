@@ -13,7 +13,7 @@ import logging
 import pymysql
 
 from app.core.websocket_manager import websocket_manager
-from app.repositories import invitados
+from app.repositories import invitados, propiedad
 
 logger = logging.getLogger(__name__)
 
@@ -43,6 +43,14 @@ async def _tras_cierre(id_vehiculo: int, sid: str, motivo: str, detener_por_sist
     await websocket_manager.cerrar_por_sid(sid, 4403, "La prueba de invitado terminó.")
 
 
+async def refrescar_espejos() -> None:
+    """Dispositivo compartido (V009): relee qué unidades usan el ESP8266 de otra."""
+    try:
+        websocket_manager.fijar_espejos(await asyncio.to_thread(propiedad.espejos))
+    except pymysql.MySQLError:
+        logger.warning("Vigilante: no se pudo leer el dispositivo compartido; se conserva el anterior.")
+
+
 async def ciclo_unico(revalidar=None) -> None:
     from app.api.routes.operaciones import detener_por_sistema
 
@@ -53,12 +61,14 @@ async def ciclo_unico(revalidar=None) -> None:
         vencidas = []
     for fila in vencidas:
         await _tras_cierre(int(fila["id_vehiculo"]), fila["sid"], "expirada", detener_por_sistema)
+    await refrescar_espejos()
     if revalidar is not None:
         await revalidar()
 
 
 async def vigilar(revalidar=None) -> None:
     ciclo = 0
+    await refrescar_espejos()
     while True:
         await asyncio.sleep(INTERVALO_S)
         ciclo += 1

@@ -80,7 +80,7 @@ def reservar(datos: ReservaEntrada, request: Request) -> ReservaSalida:
 
 @router.get("/api/invitado/sesion")
 def mi_reserva(actor: Actor = Depends(actor_actual)) -> dict:
-    if actor.rol != "invitado":
+    if not actor.es_reserva:
         raise HTTPException(status.HTTP_401_UNAUTHORIZED, "No hay una prueba de invitado activa.")
     reserva = _bd(invitados.obtener_vigente, actor.sid)
     if reserva is None:
@@ -91,6 +91,6 @@ def mi_reserva(actor: Actor = Depends(actor_actual)) -> dict:
 @router.delete("/api/invitado/sesion", status_code=status.HTTP_204_NO_CONTENT)
 async def terminar(actor: Actor = Depends(actor_actual)) -> Response:
     """Termina la prueba: libera la unidad y la DETIENE."""
-    if actor.rol == "invitado":
+    if actor.es_reserva:
         await finalizar_reserva(actor.sid, "finalizada")
     return Response(status_code=status.HTTP_204_NO_CONTENT)

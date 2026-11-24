@@ -1,4 +1,5 @@
-"""Mis vehículos: el comprador ve solo SUS unidades y decide si autoriza soporte."""
+"""Mis vehículos: el comprador ve solo SUS unidades, gestiona sus comandos y demos, reporta fallas y
+decide si autoriza soporte temporal."""
 
 from __future__ import annotations
 
@@ -11,8 +12,10 @@ from pydantic import BaseModel, Field
 from app.api.deps import auditar, requiere_usuario
 from app.core import seguridad
 from app.core.websocket_manager import websocket_manager
+from app.repositories import comandos as repo_comandos
 from app.repositories import demos as repo_demos
-from app.repositories import propiedad
+from app.repositories import propiedad, reportes
+from app.repositories.base import Conflicto
 from app.services import validacion_demos
 from app.services.demo_executor import demo_execution_manager
 from app.services.autorizacion import Actor
@@ -81,9 +84,10 @@ class DemoPrivada(BaseModel):
     pasos: list[PasoDemo] = Field(min_length=1, max_length=50, description="En orden de ejecución")
 
 
-def _validar(id_vehiculo: int, datos: DemoPrivada) -> list[dict]:
+def _validar(id_vehiculo: int, datos: DemoPrivada, id_usuario: int) -> list[dict]:
     pasos = [p.model_dump() for p in datos.pasos]
-    errores = validacion_demos.errores_pasos(pasos, repo_demos.contexto_unidad(id_vehiculo))
+    # Solo comandos de fábrica y los PROPIOS del usuario: nunca los de otro usuario.
+    errores = validacion_demos.errores_pasos(pasos, repo_demos.contexto_unidad(id_vehiculo, id_usuario))
     if errores:
         # Misma forma que los 422 de FastAPI: el frontend ya sabe mostrarla.
         raise HTTPException(status.HTTP_422_UNPROCESSABLE_CONTENT,
@@ -100,7 +104,7 @@ def _sin_demo_en_curso(id_vehiculo: int) -> None:
 def demos_de_mi_unidad(id_vehiculo: int, actor: Actor = Depends(requiere_usuario)) -> dict:
     """Demos de fábrica (solo lectura) y mis demos privadas, con pasos, comandos y límites del modelo."""
     _propia(actor, id_vehiculo)
-    contexto = repo_demos.contexto_unidad(id_vehiculo)
+    contexto = repo_demos.contexto_unidad(id_vehiculo, actor.id_usuario)
     return {
         "demos": repo_demos.demos_con_pasos(id_vehiculo, actor.id_usuario),
         "limites": {**contexto["limites"], "paso_min_ms": validacion_demos.PASO_MIN_MS,
@@ -113,7 +117,7 @@ def demos_de_mi_unidad(id_vehiculo: int, actor: Actor = Depends(requiere_usuario
 def crear_demo_privada(id_vehiculo: int, datos: DemoPrivada, request: Request,
                        actor: Actor = Depends(requiere_usuario)) -> dict:
     _propia(actor, id_vehiculo)
-    pasos = _validar(id_vehiculo, datos)
+    pasos = _validar(id_vehiculo, datos, actor.id_usuario)
     id_demo = repo_demos.crear_privada(id_vehiculo, actor.id_usuario, datos.nombre.strip(), datos.descripcion,
                                        datos.activo, pasos)
     auditar(request, actor, "demo.privada_crear", "demo", id_demo,
@@ -127,7 +131,7 @@ def actualizar_demo_privada(id_vehiculo: int, id_demo: int, datos: DemoPrivada, 
     """Guarda nombre y la lista COMPLETA de pasos (agregar, quitar, editar y reordenar en una operación)."""
     _propia(actor, id_vehiculo)
     _sin_demo_en_curso(id_vehiculo)
-    pasos = _validar(id_vehiculo, datos)
+    pasos = _validar(id_vehiculo, datos, actor.id_usuario)
     if not repo_demos.reemplazar_privada(id_demo, id_vehiculo, actor.id_usuario, datos.nombre.strip(),
                                          datos.descripcion, datos.activo, pasos):
         raise HTTPException(status.HTTP_404_NOT_FOUND, "Demo no encontrada.")
@@ -145,3 +149,97 @@ def eliminar_demo_privada(id_vehiculo: int, id_demo: int, request: Request,
         raise HTTPException(status.HTTP_404_NOT_FOUND, "Demo no encontrada.")
     auditar(request, actor, "demo.privada_eliminar", "demo", id_demo, detalle={"id_vehiculo": id_vehiculo})
     return Response(status_code=status.HTTP_204_NO_CONTENT)
+
+
+# ---------- Comandos propios (V009) ----------
+
+class ComandoPropio(BaseModel):
+    nombre: str = Field(min_length=1, max_length=60)
+    codigo: int = Field(ge=1, le=12, description="Código de un movimiento de fábrica YA registrado en la unidad")
+    descripcion: str | None = Field(None, max_length=255)
+    duracion_max_ms: int | None = Field(None, ge=100, le=10_000, description="Tope por paso de demo (≤ el del movimiento base)")
+
+
+def _bd(funcion, *args):
+    try:
+        return funcion(*args)
+    except LookupError as error:
+        raise HTTPException(status.HTTP_404_NOT_FOUND, str(error)) from None
+    except Conflicto as error:
+        raise HTTPException(status.HTTP_409_CONFLICT, str(error)) from None
+    except repo_comandos.MovimientoNoRegistrado as error:
+        raise HTTPException(status.HTTP_422_UNPROCESSABLE_CONTENT,
+                            detail=[{"loc": ["body", "codigo"], "msg": str(error), "type": "movimiento_no_registrado"}]) from None
+    except pymysql.MySQLError:
+        raise HTTPException(status.HTTP_503_SERVICE_UNAVAILABLE, "Error al consultar la base de datos.") from None
+
+
+@router.get("/{id_vehiculo}/comandos", responses={404: {}})
+def mis_comandos(id_vehiculo: int, actor: Actor = Depends(requiere_usuario)) -> dict:
+    """Mis comandos propios y los movimientos de fábrica (solo lectura) que pueden servirles de base."""
+    _propia(actor, id_vehiculo)
+    return {
+        "comandos": _bd(repo_comandos.propios, id_vehiculo, actor.id_usuario),
+        "movimientos": _bd(repo_comandos.movimientos_base, id_vehiculo),
+    }
+
+
+@router.post("/{id_vehiculo}/comandos", status_code=status.HTTP_201_CREATED, responses={404: {}, 409: {}, 422: {}})
+def crear_comando_propio(id_vehiculo: int, datos: ComandoPropio, request: Request,
+                         actor: Actor = Depends(requiere_usuario)) -> dict:
+    _propia(actor, id_vehiculo)
+    id_comando = _bd(repo_comandos.crear_propio, id_vehiculo, actor.id_usuario, datos.nombre.strip(), datos.codigo,
+                     datos.descripcion, datos.duracion_max_ms)
+    auditar(request, actor, "comando.propio_crear", "comando", id_comando,
+            detalle={"id_vehiculo": id_vehiculo, "codigo": datos.codigo, "nombre": datos.nombre.strip()})
+    return {"id_comando": id_comando, "codigo": datos.codigo}
+
+
+@router.delete("/{id_vehiculo}/comandos/{id_comando}", status_code=status.HTTP_204_NO_CONTENT,
+               responses={404: {}, 409: {}})
+def eliminar_comando_propio(id_vehiculo: int, id_comando: int, request: Request,
+                            actor: Actor = Depends(requiere_usuario)) -> Response:
+    """Solo los comandos PROPIOS: uno de fábrica o del administrador responde 404 (no es tuyo)."""
+    _propia(actor, id_vehiculo)
+    resultado = _bd(repo_comandos.eliminar_propio, id_comando, id_vehiculo, actor.id_usuario)
+    if resultado is None:
+        auditar(request, actor, "acceso.denegado", "comando", id_comando, resultado="denegado",
+                detalle={"motivo": "comando_no_propio", "id_vehiculo": id_vehiculo})
+        raise HTTPException(status.HTTP_404_NOT_FOUND, "Comando no encontrado entre tus comandos propios.")
+    auditar(request, actor, "comando.propio_eliminar", "comando", id_comando,
+            detalle={"id_vehiculo": id_vehiculo, "resultado": resultado})
+    return Response(status_code=status.HTTP_204_NO_CONTENT)
+
+
+# ---------- Reportes de falla (V009) ----------
+
+class ReporteFalla(BaseModel):
+    descripcion: str = Field(min_length=5, max_length=500)
+    autorizar_soporte: bool = Field(False, description="Además, autoriza a la empresa a operar la unidad")
+    minutos: int = Field(60, ge=15, le=1440)
+
+
+@router.get("/{id_vehiculo}/reportes", responses={404: {}})
+def mis_reportes(id_vehiculo: int, actor: Actor = Depends(requiere_usuario)) -> dict:
+    _propia(actor, id_vehiculo)
+    items = _bd(reportes.de_usuario, actor.id_usuario, id_vehiculo)
+    return {"total": len(items), "reportes": items}
+
+
+@router.post("/{id_vehiculo}/reportes", status_code=status.HTTP_201_CREATED, responses={404: {}, 422: {}})
+def reportar_falla(id_vehiculo: int, datos: ReporteFalla, request: Request,
+                   actor: Actor = Depends(requiere_usuario)) -> dict:
+    """Reporta una falla; con `autorizar_soporte` otorga en el mismo paso el acceso temporal."""
+    _propia(actor, id_vehiculo)
+    descripcion = datos.descripcion.strip()
+    id_reporte = _bd(reportes.crear, id_vehiculo, actor.id_usuario, descripcion)
+    auditar(request, actor, "reporte.crear", "vehiculo", id_vehiculo, detalle={"id_reporte": id_reporte})
+    respuesta: dict = {"id_reporte": id_reporte, "id_vehiculo": id_vehiculo, "soporte": None}
+    if datos.autorizar_soporte:
+        expira = seguridad.ahora() + timedelta(minutes=datos.minutos)
+        id_autorizacion = _bd(propiedad.otorgar_soporte, id_vehiculo, actor.id_usuario, None,
+                              f"Reporte #{id_reporte}: {descripcion}"[:255], expira)
+        auditar(request, actor, "soporte.otorgar", "vehiculo", id_vehiculo,
+                detalle={"id_autorizacion": id_autorizacion, "minutos": datos.minutos, "id_reporte": id_reporte})
+        respuesta["soporte"] = {"id_autorizacion": id_autorizacion, "expira_en": expira}
+    return respuesta

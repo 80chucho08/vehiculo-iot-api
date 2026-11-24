@@ -91,7 +91,7 @@ def crear_unidad(datos: dict[str, Any]) -> dict[str, Any]:
                 cur.execute(
                     "INSERT INTO comandos (id_vehiculo, nombre, codigo, descripcion, activo, duracion_max_ms, permitido_invitado) "
                     "SELECT %s, nombre, codigo, descripcion, activo, duracion_max_ms, permitido_invitado "
-                    "  FROM comandos WHERE id_vehiculo = %s",
+                    "  FROM comandos WHERE id_vehiculo = %s AND tipo = 'fabrica'",  # nunca los propios de un usuario
                     (nueva, origen),
                 )
                 comandos = cur.rowcount
@@ -112,7 +112,7 @@ def crear_unidad(datos: dict[str, Any]) -> dict[str, Any]:
                         "SELECT %s, cn.id_comando, dm.orden, dm.duracion_ms, dm.pausa_ms "
                         "  FROM demo_movimientos dm "
                         "  JOIN comandos co ON co.id_comando = dm.id_comando "
-                        "  JOIN comandos cn ON cn.id_vehiculo = %s AND cn.codigo = co.codigo "
+                        "  JOIN comandos cn ON cn.id_vehiculo = %s AND cn.codigo_fabrica = co.codigo "
                         " WHERE dm.id_demo = %s",
                         (id_demo, nueva, demo["id_demo"]),
                     )
@@ -133,7 +133,7 @@ def actualizar_unidad(id_vehiculo: int, datos: dict[str, Any]) -> dict[str, Any]
         with transaccion() as cur:
             cur.execute(
                 "SELECT v.id_vehiculo, v.nombre, v.numero_serie, v.tipo_unidad, v.descripcion, v.microcontrolador, v.activo, "
-                "       a.id_usuario AS id_propietario "
+                "       v.id_unidad_fisica, a.id_usuario AS id_propietario "
                 "  FROM vehiculos v LEFT JOIN asignaciones a ON a.vehiculo_activo = v.id_vehiculo "
                 " WHERE v.id_vehiculo = %s FOR UPDATE",
                 (id_vehiculo,),
@@ -143,11 +143,26 @@ def actualizar_unidad(id_vehiculo: int, datos: dict[str, Any]) -> dict[str, Any]
                 raise LookupError("Vehículo no encontrado.")
             if anterior["id_propietario"] is not None and (datos["tipo_unidad"] != "venta" or not datos["activo"]):
                 raise Conflicto("La unidad está vendida: finaliza la asignación antes de cambiar su tipo o darla de baja.")
+            fisica = datos.get("id_unidad_fisica")
+            if fisica is not None:
+                # Dispositivo compartido (V009): la otra unidad debe existir, estar activa y tener su
+                # propio ESP8266 (no se encadenan unidades espejo).
+                if int(fisica) == id_vehiculo:
+                    raise Conflicto("Una unidad no puede usar su propio dispositivo como compartido.")
+                cur.execute("SELECT activo, id_unidad_fisica FROM vehiculos WHERE id_vehiculo = %s", (fisica,))
+                destino = cur.fetchone()
+                if destino is None or not destino["activo"]:
+                    raise Conflicto("La unidad del dispositivo compartido no existe o está dada de baja.")
+                if destino["id_unidad_fisica"] is not None:
+                    raise Conflicto("Esa unidad ya usa el dispositivo de otra; elige la unidad que tiene el ESP8266.")
+                cur.execute("SELECT 1 FROM vehiculos WHERE id_unidad_fisica = %s LIMIT 1", (id_vehiculo,))
+                if cur.fetchone() is not None:
+                    raise Conflicto("Otras unidades usan el dispositivo de esta; no puede depender de otra.")
             cur.execute(
                 "UPDATE vehiculos SET nombre = %s, numero_serie = %s, tipo_unidad = %s, descripcion = %s, "
-                "       microcontrolador = %s, activo = %s WHERE id_vehiculo = %s",
+                "       microcontrolador = %s, activo = %s, id_unidad_fisica = %s WHERE id_vehiculo = %s",
                 (datos["nombre"], datos["numero_serie"], datos["tipo_unidad"], datos.get("descripcion"),
-                 datos.get("microcontrolador"), int(datos["activo"]), id_vehiculo),
+                 datos.get("microcontrolador"), int(datos["activo"]), fisica, id_vehiculo),
             )
             return anterior
     except pymysql.MySQLError as error:

@@ -29,3 +29,6 @@ esquema_actual.sql
 
 # Respaldos logicos de la base (contienen datos)
 respaldos/
+
+# Contraseñas de las cuentas de prueba (scripts/preparar_pruebas.py)
+*.local.txt

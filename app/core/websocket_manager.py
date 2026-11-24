@@ -12,6 +12,19 @@ class WebSocketManager:
         self.pending_demo_acks: dict[int, asyncio.Future[dict]] = {}
         # Etapa 8: quién está detrás de cada conexión de observador (None = anónimo de transición).
         self.actores: dict[WebSocket, object] = {}
+        # V009 · dispositivo compartido: unidad registrada -> unidad cuyo ESP8266 la mueve.
+        # Permite registrar un mismo carrito físico varias veces (exhibición, vendida, en stock).
+        self.espejos: dict[int, int] = {}
+
+    def fijar_espejos(self, mapa: dict[int, int]) -> None:
+        self.espejos = {int(u): int(f) for u, f in mapa.items() if f is not None and int(u) != int(f)}
+
+    def unidad_fisica(self, id_vehiculo: int) -> int:
+        """Unidad cuya conexión de dispositivo atiende a `id_vehiculo` (ella misma si no comparte)."""
+        return self.espejos.get(id_vehiculo, id_vehiculo)
+
+    def unidades_del_dispositivo(self, id_fisica: int) -> list[int]:
+        return [id_fisica, *sorted(u for u, f in self.espejos.items() if f == id_fisica)]
 
     async def connect(
         self,
@@ -64,6 +77,8 @@ class WebSocketManager:
         id_vehiculo: int,
         role: str | None = None,
     ) -> int:
+        if role == "dispositivo":
+            id_vehiculo = self.unidad_fisica(id_vehiculo)
         clientes = self.connections.get(id_vehiculo, {})
         if role is None:
             return len(clientes)
@@ -97,22 +112,39 @@ class WebSocketManager:
         role: str | None = None,
     ) -> int:
         conexiones = self.connections.get(id_vehiculo, {})
-        clientes = [
-            websocket
+        destinos = [
+            (id_vehiculo, websocket, mensaje)
             for websocket, cliente_role in conexiones.items()
             if role is None or cliente_role == role
         ]
+        fisica = self.unidad_fisica(id_vehiculo)
+        if fisica != id_vehiculo and role in (None, "dispositivo"):
+            # El firmware solo acepta mensajes con SU id_vehiculo: se reescribe para el ESP8266 compartido.
+            copia = {**mensaje, "id_vehiculo": fisica} if "id_vehiculo" in mensaje else mensaje
+            destinos = [d for d in destinos if conexiones.get(d[1]) != "dispositivo"]
+            destinos += [
+                (fisica, websocket, copia)
+                for websocket, cliente_role in self.connections.get(fisica, {}).items()
+                if cliente_role == "dispositivo"
+            ]
 
         enviados = 0
 
-        for websocket in clientes:
+        for id_destino, websocket, contenido in destinos:
             try:
-                await websocket.send_json(mensaje)
+                await websocket.send_json(contenido)
                 enviados += 1
             except Exception:
-                self.disconnect(id_vehiculo, websocket)
+                self.disconnect(id_destino, websocket)
 
         return enviados
+
+    async def avisar_estado_dispositivo(self, id_fisica: int, conectado: bool) -> None:
+        """dispositivo_estado a los observadores de la unidad física y de las que comparten su ESP8266."""
+        for id_unidad in self.unidades_del_dispositivo(id_fisica):
+            await self.send_to_vehicle(
+                id_unidad, {"tipo": "dispositivo_estado", "id_vehiculo": id_unidad, "conectado": conectado}, role="observador"
+            )
 
     def observadores(self) -> list[tuple[int, WebSocket, object]]:
         """(id_vehiculo, socket, actor) de todas las conexiones de observador abiertas."""

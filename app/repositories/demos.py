@@ -22,8 +22,11 @@ def demo(id_demo: int) -> dict[str, Any] | None:
     )
 
 
-def contexto_unidad(id_vehiculo: int) -> dict[str, Any]:
-    """Límites del modelo y comandos de la unidad, para validar y para el editor."""
+def contexto_unidad(id_vehiculo: int, id_usuario: int | None = None, todos: bool = False) -> dict[str, Any]:
+    """Límites del modelo y comandos de la unidad, para validar y para el editor.
+
+    Comandos: los de fábrica y los propios de `id_usuario` (V009); con `todos` (admin), también los
+    propios de cualquier usuario, para poder editar cualquier demo sin perder sus pasos."""
     fila = una(
         "SELECT m.duracion_max_paso_ms, m.pasos_max_demo FROM vehiculos v "
         "  LEFT JOIN modelos_vehiculo m ON m.id_modelo = v.id_modelo WHERE v.id_vehiculo = %s",
@@ -31,8 +34,9 @@ def contexto_unidad(id_vehiculo: int) -> dict[str, Any]:
     )
     limites = {k: (fila or {}).get(k) or v for k, v in LIMITES_POR_OMISION.items()}
     comandos = todas(
-        "SELECT id_comando, nombre, codigo, activo, duracion_max_ms FROM comandos WHERE id_vehiculo = %s ORDER BY codigo",
-        (id_vehiculo,),
+        "SELECT id_comando, nombre, codigo, activo, duracion_max_ms, tipo, id_propietario FROM comandos "
+        " WHERE id_vehiculo = %s AND (tipo = 'fabrica' OR %s OR id_propietario = %s) ORDER BY codigo, tipo, id_comando",
+        (id_vehiculo, int(todos), id_usuario),
     )
     return {"limites": limites, "comandos": comandos}
 
@@ -107,4 +111,61 @@ def eliminar_privada(id_demo: int, id_vehiculo: int, id_usuario: int) -> bool:
             "DELETE FROM demos WHERE id_demo = %s AND id_vehiculo = %s AND tipo = 'privada' AND id_propietario = %s",
             (id_demo, id_vehiculo, id_usuario),
         )
+        return cur.rowcount == 1
+
+
+# ---------- Administración de demos (V009): el admin gestiona TODAS, también las privadas ----------
+
+def demos_de_unidad_admin(id_vehiculo: int) -> list[dict[str, Any]]:
+    """Todas las demos de la unidad (fábrica y privadas, activas o no) con dueño y pasos."""
+    demos = todas(
+        "SELECT d.id_demo, d.nombre, d.descripcion, d.activo, d.tipo, d.id_propietario, u.email AS propietario "
+        "  FROM demos d LEFT JOIN usuarios u ON u.id_usuario = d.id_propietario "
+        " WHERE d.id_vehiculo = %s ORDER BY d.tipo = 'privada', d.id_demo",
+        (id_vehiculo,),
+    )
+    if not demos:
+        return []
+    marcadores = ", ".join(["%s"] * len(demos))
+    pasos = todas(
+        "SELECT dm.id_demo, dm.orden, dm.id_comando, c.nombre AS comando, c.codigo, dm.duracion_ms, dm.pausa_ms "
+        "  FROM demo_movimientos dm JOIN comandos c ON c.id_comando = dm.id_comando "
+        f" WHERE dm.id_demo IN ({marcadores}) ORDER BY dm.id_demo, dm.orden",
+        tuple(d["id_demo"] for d in demos),
+    )
+    for d in demos:
+        d["pasos"] = [p for p in pasos if p["id_demo"] == d["id_demo"]]
+        d["editable"] = True
+    return demos
+
+
+def crear_fabrica(id_vehiculo: int, nombre: str, descripcion: str | None, activo: bool,
+                  pasos: list[dict[str, Any]]) -> int:
+    with transaccion() as cur:
+        cur.execute(
+            "INSERT INTO demos (id_vehiculo, nombre, descripcion, activo, tipo) VALUES (%s, %s, %s, %s, 'fabrica')",
+            (id_vehiculo, nombre, descripcion, int(activo)),
+        )
+        id_demo = int(cur.lastrowid)
+        _insertar_pasos(cur, id_demo, pasos)
+        return id_demo
+
+
+def reemplazar_admin(id_demo: int, nombre: str, descripcion: str | None, activo: bool,
+                     pasos: list[dict[str, Any]]) -> bool:
+    """Igual que reemplazar_privada pero para cualquier demo; conserva su tipo y su dueño."""
+    with transaccion() as cur:
+        cur.execute("SELECT id_demo FROM demos WHERE id_demo = %s FOR UPDATE", (id_demo,))
+        if cur.fetchone() is None:
+            return False
+        cur.execute("UPDATE demos SET nombre = %s, descripcion = %s, activo = %s WHERE id_demo = %s",
+                    (nombre, descripcion, int(activo), id_demo))
+        cur.execute("DELETE FROM demo_movimientos WHERE id_demo = %s", (id_demo,))
+        _insertar_pasos(cur, id_demo, pasos)
+        return True
+
+
+def eliminar_admin(id_demo: int) -> bool:
+    with transaccion() as cur:
+        cur.execute("DELETE FROM demos WHERE id_demo = %s", (id_demo,))
         return cur.rowcount == 1
