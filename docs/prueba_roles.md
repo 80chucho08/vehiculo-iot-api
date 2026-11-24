@@ -2,7 +2,7 @@
 
 Entorno preparado con `scripts/preparar_pruebas.py` sobre **un solo carrito físico** (ESP8266 de la unidad 1). Las contraseñas están en `cuentas_prueba.local.txt` (raíz del repo de la API, ignorado por git): entrégalas al profesor por un medio privado.
 
-Sitio: <https://80chucho08.github.io/control-iot/> → **Administración** para iniciar sesión.
+Sitio: <https://80chucho08.github.io/vehiculo-iot-front/> → **Administración** para iniciar sesión.
 
 ## Cuentas y recursos
 
