@@ -8,7 +8,7 @@ Sitio: <https://80chucho08.github.io/vehiculo-iot-front/> → **Administración*
 
 | Cuenta | Rol | Recursos preparados |
 |---|---|---|
-| `invitado@carrito.test` | Invitado | Unidad 1 (exhibición): movimientos de grúa y garra, luz y demos de fábrica |
+| `invitado@carrito.test` | Invitado | Unidad 1 (exhibición): todos los movimientos 1-12 (grúa, garra, Control ON/OFF, Sonido, Velocidad x2, luz) y demos de fábrica |
 | `usuario@carrito.test` | Usuario (comprador) | Unidad 2 «Excavadora IoT · Cliente» (vendida a él); comando propio «Subir garra suave»; demo privada «Saludo de garra»; demo de fábrica «Saludo de fábrica» (no editable) |
 | `admin@carrito.test` | Administrador | Todo el sistema; unidad 3 «Excavadora IoT · Stock» disponible para vender |
 
@@ -18,7 +18,7 @@ Sitio: <https://80chucho08.github.io/vehiculo-iot-front/> → **Administración*
 
 ### 1. Invitado
 1. Inicia sesión → «Cuenta de invitado» → **Controlar el carrito en exhibición**: mueve grúa y garra, luz, demo de fábrica. ✔
-2. No aparecen Control ON/OFF, Sonido ni Velocidad (no habilitados para invitados); por API responden 403.
+2. Ve también Control ON/OFF, Sonido y Velocidad x2. Qué puede usar un invitado lo decide el admin en Inventario → Comandos → «Invitados»; uno desmarcado desaparece de su CONTROL y por API responde 403.
 3. Cambia la URL a `?vehiculo=2` o `?vehiculo=3`: «Vehículo no encontrado» (404) y el WSS no conecta.
 4. No tiene pestañas de administración ni «Mis vehículos»: no puede crear, editar ni eliminar comandos o demos (403).
 

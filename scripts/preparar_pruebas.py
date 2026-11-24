@@ -5,6 +5,7 @@
 
 Qué deja listo (reutiliza lo que ya exista, no borra nada):
   - Unidad física (--unidad-fisica, por omisión 1): exhibición. Su ESP8266 es el único que se conecta.
+    Todos sus movimientos 1-12 quedan habilitados para invitados.
   - «· Cliente» (CJ-PRUEBA-0002, venta): asignada al Usuario de prueba; usa el ESP8266 de la física.
   - «· Stock» (CJ-PRUEBA-0003, venta): disponible para vender; usa el ESP8266 de la física.
   - Cuentas: Invitado, Usuario (comprador) y Administrador de prueba.
@@ -158,6 +159,14 @@ def main() -> None:
                 cur.execute("INSERT INTO demo_movimientos (id_demo, id_comando, orden, duracion_ms, pausa_ms) VALUES (%s, %s, %s, %s, %s)",
                             (id_demo, id_comando, orden, duracion, pausa))
         pasos_log.append(f"demo {tipo} «{nombre}» creada")
+
+    # El invitado puede usar TODOS los movimientos 1-12 de la exhibición (también Control ON/OFF,
+    # Sonido y Velocidad x2). El 13 (demo local del firmware) sigue fuera: la API no lo admite.
+    with transaccion() as cur:
+        cur.execute("UPDATE comandos SET permitido_invitado = 1 WHERE id_vehiculo = %s AND tipo = 'fabrica' "
+                    "   AND codigo BETWEEN 1 AND 12 AND permitido_invitado = 0", (args.unidad_fisica,))
+        if cur.rowcount:
+            pasos_log.append(f"{cur.rowcount} comando(s) más habilitados para invitados en la unidad {args.unidad_fisica}")
 
     asegurar_demo("Saludo de garra", "Demo privada del Usuario: baja y sube la garra como saludo.", "privada",
                   [(bajar, 800, 200), (subir, 800, 200), (bajar, 800, 200), (subir, 800, 300), (id_propio, 600, 0)])
