@@ -49,3 +49,18 @@ El E2E (48 casos) mueve brevemente la garra si el carrito está conectado y deja
 1. Respaldo (`scripts/respaldo_bd.py`) y `scripts/migrar.py --bd vehiculo_iot --confirmar-produccion vehiculo_iot subir` (aditiva: rol `invitado`, comandos propios, `reportes_falla`, `vehiculos.id_unidad_fisica`). El código anterior de la API sigue funcionando con este esquema.
 2. EC2: `git pull` y `Stop-ScheduledTask -TaskName "Vehiculo IoT API"; Start-ScheduledTask -TaskName "Vehiculo IoT API"`.
 3. `scripts/preparar_pruebas.py --bd vehiculo_iot --confirmar-produccion vehiculo_iot` (idempotente; `--restablecer` regenera las contraseñas).
+
+## Ensayo del flujo de venta (2026-11-24)
+
+Hecho por la API con cuentas de ensayo (no con las del profesor), 21/21 pasos correctos. Lo creado se conserva:
+
+| Paso | Pantalla | Resultado |
+|---|---|---|
+| 1 | Clientes → Nueva cuenta (rol Comprador) | `cliente.ensayo@carrito.test` |
+| 2 | Inventario → Nueva unidad (tipo Venta) | Unidad 4 «Excavadora IoT · Ensayo», `CJ-PRUEBA-0004`, con 13 comandos y la demo de fábrica copiados de la unidad 1 |
+| 3 | Inventario → Editar → Dispositivo (ESP8266) → Compartido: el de la unidad 1 | La unidad 4 usa el carrito físico de la unidad 1 |
+| 4 | Asignaciones → Asignar unidad | Unidad 4 vendida al cliente; vender la unidad 1 (exhibición) responde 409 |
+| 5 | Sesión del cliente → Mis vehículos → Controlar | Solo ve la unidad 4; luz, DETENER, WebSocket, comando propio e historial correctos |
+| 6 | Permisos | El cliente recibe 404 en otra unidad; el admin recibe 403 en la unidad recién vendida |
+
+Una unidad nueva nace con dispositivo **propio**: sin el paso 3 aparece «Sin conexión» y no mueve el carrito.
